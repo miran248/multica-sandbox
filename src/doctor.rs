@@ -1,4 +1,4 @@
-//! `multica-sandbox doctor` — what the host must provide before a box can run.
+//! `msbx doctor` — what the host must provide before a box can run.
 
 use crate::driver;
 use std::path::Path;
@@ -11,7 +11,7 @@ pub fn run() -> ExitCode {
     let mut failures = 0u32;
     let mut warnings = 0u32;
 
-    println!("multica-sandbox doctor\n");
+    println!("msbx doctor\n");
 
     let version = driver::macos_version();
     match driver::macos_major() {

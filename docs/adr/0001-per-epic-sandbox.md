@@ -1,7 +1,7 @@
 # 0001 — One sandbox namespace per epic on Apple containers
 
 Status: accepted for v1. The driver choice is confirmed or replaced by the
-stage-1 spike (MIR-179); everything else here does not depend on that result.
+stage-1 init run (MIR-179); everything else here does not depend on that result.
 
 ## Context
 
@@ -15,11 +15,11 @@ loopback IP per project and a Caddy sidecar — needs a human for every new epic
 ## Decision
 
 **One namespace of containers per epic, on the host, outside Multica.** The
-tool is `multica-sandbox`, a Rust binary in this repository.
+tool is `msbx`, the Rust binary built from this repository.
 
 1. **The harness stays on the host.** `dsh`, model calls and the Multica task
    boundary are not moved into the box. The box is a tool target, reached by
-   `multica-sandbox exec <epic> -- <cmd>`, with a host-side `env --` escape
+   `msbx exec <epic> -- <cmd>`, with a host-side `env --` escape
    hatch for tools that must run where `gh`, `kubectl` and `terraform` run.
 2. **The unit is the epic**, not the task and not the issue: separate state,
    separate names and separate lifecycle, so epics run in parallel.
@@ -54,5 +54,5 @@ tool is `multica-sandbox`, a Rust binary in this repository.
   convention, not a boundary.
 - `container machine` remains unavailable until it can express names; if Apple
   adds network control to machines, the driver decision is revisited.
-- The spec is written after the spike, so the reproduction of its assertions is
-  part of the record rather than an assumption.
+- The spec is written after the init checks, so the reproduction of their
+  assertions is part of the record rather than an assumption.

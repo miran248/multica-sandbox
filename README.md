@@ -1,28 +1,29 @@
 # multica-sandbox
 
 One sandbox namespace per epic, on the machine that runs the agent, outside
-Multica. `multica-sandbox` gives every epic its own containers, its own service
+Multica. The `msbx` binary gives every epic its own containers, its own service
 state and its own host names, so two epics can run Postgres on `5432` at the
 same time and both stay reachable from the host.
 
 ```
-pg.signals-mir42.msbx.test     →  signals-mir42-pg     :5432
-web.signals-mir42.msbx.test    →  signals-mir42-web    :3000
-pg.hours-mir42.msbx.test       →  hours-mir42-pg       :5432
+pg.mir42.signals.msbx.test     →  signals-mir42-pg     :5432
+web.mir42.signals.msbx.test    →  signals-mir42-web    :3000
+pg.mir42.hours.msbx.test       →  hours-mir42-pg       :5432
 ```
 
-The container name is the reverse of the name it answers to. The dotted name is
-a container alias; the flat name is the container. A role keeps its native port:
-a name is never a remapped port.
+`<role>.<epic>.<project>.msbx.test` is the name; `<project>-<epic>-<role>` is
+the container. The container name is the name in reverse, and the dotted name
+is a container alias. A role keeps its native port: a name is never a remapped
+port.
 
 ## Status
 
-**Pre-spike.** This repository exists to answer one question with evidence: does
+**Pre-spec.** This repository exists to answer one question with evidence: does
 Apple's `container` give a host-reachable address and a `msbx.test` name to
-every container without publishing ports? The [stage-1 spike][spike] decides it;
-the spec follows the measurement. Only `doctor` and `spike` are implemented.
+every container without publishing ports? The [stage-1 init run][init] decides
+it; the spec follows the measurement. Only `doctor` and `init` are implemented.
 
-[spike]: https://github.com/miran248/multica-sandbox/issues
+[init]: https://multica.ai/miran248/issues/MIR-179
 
 ## What it will manage
 
@@ -43,14 +44,9 @@ the spec follows the measurement. Only `doctor` and `spike` are implemented.
 cargo build
 cargo test
 cargo run -- doctor
+cargo run -- init
 ```
 
-The spike needs macOS 26 and `container system start`; it prints the one
-privileged command it does not run.
-
-## Knowledge
-
-- [docs/README.md](docs/README.md) — index
-- [GLOSSARY.md](GLOSSARY.md) — vocabulary
-- [docs/adr/](docs/adr/) — decisions
-- [docs/specs/](docs/specs/) — approved specs
+`msbx init` is the first-run check on a fresh host: it needs macOS 26 and
+`container system start`, prints the one privileged command it does not run,
+and exits non-zero when a check fails or is skipped.

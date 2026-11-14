@@ -1,8 +1,8 @@
-//! `multica-sandbox spike` — the measurements that decide the driver.
+//! `msbx init` — the first-run checks that prove the driver contract.
 //!
-//! Seven assertions, run against the real `container` CLI. Every check prints
-//! what it observed; a skipped check makes the run incomplete (exit 2), never
-//! a pass. The tool runs no `sudo`; the one privileged command is printed for
+//! Seven checks, run against the real `container` CLI. Every check prints what
+//! it observed; a skipped check makes the run incomplete (exit 2), never a
+//! pass. The tool runs no `sudo`; the one privileged command is printed for
 //! the operator.
 
 use crate::driver;
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-const PROJECT: &str = "spike";
+const PROJECT: &str = "demo";
 const ZONE: &str = "msbx.test";
 const PG_IMAGE: &str = "docker.io/library/postgres:16-alpine";
 const ALPINE_IMAGE: &str = "docker.io/library/alpine:3.20";
@@ -72,7 +72,7 @@ fn container_for(epic: &str) -> String {
 
 pub fn run(args: &[String]) -> ExitCode {
     let keep = args.iter().any(|arg| arg == "--keep");
-    let temp = std::env::temp_dir().join(format!("multica-sandbox-spike-{}", std::process::id()));
+    let temp = std::env::temp_dir().join(format!("msbx-init-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp);
 
     let mut checks: Vec<Check> = Vec::new();
@@ -80,23 +80,23 @@ pub fn run(args: &[String]) -> ExitCode {
 
     if !check_toolchain(&mut checks) {
         for (id, title) in [
-            ("S2", "ports"),
-            ("S3", "host reachability"),
-            ("S4", "names"),
-            ("S5", "cross-container"),
-            ("S6", "alias precedence"),
-            ("S7", "mounts and env"),
+            ("C2", "ports"),
+            ("C3", "host reachability"),
+            ("C4", "names"),
+            ("C5", "cross-container"),
+            ("C6", "alias precedence"),
+            ("C7", "mounts and env"),
         ] {
-            checks.push(Check::skip(id, title, "skipped: S1 did not pass"));
+            checks.push(Check::skip(id, title, "skipped: C1 did not pass"));
         }
         return finish(&checks, &temp, &names, keep);
     }
 
-    let env_file = match write_file(&temp, "postgres.env", "POSTGRES_PASSWORD=spike\n") {
+    let env_file = match write_file(&temp, "postgres.env", "POSTGRES_PASSWORD=msbx-init\n") {
         Ok(path) => path,
         Err(error) => {
             checks.push(Check::fail(
-                "S2",
+                "C2",
                 "ports",
                 format!("cannot write the env file: {error}"),
             ));
@@ -149,19 +149,19 @@ pub fn run(args: &[String]) -> ExitCode {
         let b = started[1].1;
         if a == b {
             Check::fail(
-                "S2",
+                "C2",
                 "ports",
                 format!("both containers share {a}; no per-epic address"),
             )
         } else {
             Check::pass(
-                "S2",
+                "C2",
                 "ports",
                 format!("both Postgres on {PG_PORT}, no -p: epic-a {a}, epic-b {b}"),
             )
         }
     } else {
-        Check::fail("S2", "ports", start_errors.join(" ; "))
+        Check::fail("C2", "ports", start_errors.join(" ; "))
     });
 
     checks.push(check_reachability(&started));
@@ -190,13 +190,13 @@ pub fn run(args: &[String]) -> ExitCode {
             parts.join(", ")
         };
         if ok && !parts.is_empty() {
-            Check::pass("S4", "names", detail)
+            Check::pass("C4", "names", detail)
         } else {
-            Check::fail("S4", "names", detail)
+            Check::fail("C4", "names", detail)
         }
     } else {
         Check::skip(
-            "S4",
+            "C4",
             "names",
             format!("{RESOLVER} is missing; run once: sudo container system dns create {ZONE}"),
         )
@@ -235,7 +235,7 @@ fn check_toolchain(checks: &mut Vec<Check>) -> bool {
     );
 
     checks.push(if ok {
-        Check::pass("S1", "toolchain", detail)
+        Check::pass("C1", "toolchain", detail)
     } else {
         let mut why = Vec::new();
         if !modern {
@@ -247,7 +247,7 @@ fn check_toolchain(checks: &mut Vec<Check>) -> bool {
         if !running {
             why.push("run `container system start`");
         }
-        Check::fail("S1", "toolchain", format!("{detail} — {}", why.join("; ")))
+        Check::fail("C1", "toolchain", format!("{detail} — {}", why.join("; ")))
     });
 
     ok
@@ -256,9 +256,9 @@ fn check_toolchain(checks: &mut Vec<Check>) -> bool {
 fn check_reachability(started: &[(&'static str, Ipv4Addr)]) -> Check {
     if started.len() != 2 {
         return Check::skip(
-            "S3",
+            "C3",
             "host reachability",
-            "skipped: S2 did not start two containers",
+            "skipped: C2 did not start two containers",
         );
     }
     let mut reachable = 0;
@@ -273,26 +273,26 @@ fn check_reachability(started: &[(&'static str, Ipv4Addr)]) -> Check {
         }
     }
     if reachable == 2 {
-        Check::pass("S3", "host reachability", parts.join(", "))
+        Check::pass("C3", "host reachability", parts.join(", "))
     } else {
-        Check::fail("S3", "host reachability", parts.join(", "))
+        Check::fail("C3", "host reachability", parts.join(", "))
     }
 }
 
 fn check_cross_container(started: &[(&'static str, Ipv4Addr)], zone_installed: bool) -> Check {
     if !zone_installed {
         return Check::skip(
-            "S5",
+            "C5",
             "cross-container",
             "skipped: the msbx.test resolver is not installed",
         );
     }
     let peer = match started.iter().find(|(epic, _)| *epic == "epic-b") {
         Some((_, ip)) => *ip,
-        None => return Check::skip("S5", "cross-container", "skipped: epic-b did not start"),
+        None => return Check::skip("C5", "cross-container", "skipped: epic-b did not start"),
     };
     if !started.iter().any(|(epic, _)| *epic == "epic-a") {
-        return Check::skip("S5", "cross-container", "skipped: epic-a did not start");
+        return Check::skip("C5", "cross-container", "skipped: epic-a did not start");
     }
 
     let alias = alias_for("epic-b");
@@ -304,13 +304,13 @@ fn check_cross_container(started: &[(&'static str, Ipv4Addr)], zone_installed: b
     let found = out.ok && out.stdout.contains(&peer.to_string());
     if found {
         Check::pass(
-            "S5",
+            "C5",
             "cross-container",
             format!("epic-a resolves {alias} → {peer}"),
         )
     } else {
         Check::fail(
-            "S5",
+            "C5",
             "cross-container",
             format!(
                 "epic-a could not resolve {alias} (expected {peer}): {}",
@@ -327,14 +327,14 @@ fn check_alias_precedence(
 ) -> Check {
     if !zone_installed {
         return Check::skip(
-            "S6",
+            "C6",
             "alias precedence",
             "skipped: the msbx.test resolver is not installed",
         );
     }
     let a_ip = match started.iter().find(|(epic, _)| *epic == "epic-a") {
         Some((_, ip)) => *ip,
-        None => return Check::skip("S6", "alias precedence", "skipped: epic-a did not start"),
+        None => return Check::skip("C6", "alias precedence", "skipped: epic-a did not start"),
     };
 
     let gateway = format!("{PROJECT}-epic-a-gw");
@@ -358,7 +358,7 @@ fn check_alias_precedence(
     );
     if !out.ok {
         return Check::fail(
-            "S6",
+            "C6",
             "alias precedence",
             format!(
                 "could not start the subtree-alias container: {}",
@@ -368,28 +368,31 @@ fn check_alias_precedence(
     }
 
     let gateway_ip = inspect_ipv4(&gateway);
-    let resolved = resolve_alias(&alias_for("epic-a"));
+    let alias = alias_for("epic-a");
+    let resolved = resolve_alias(&alias);
 
     match (resolved, gateway_ip) {
         (Some(found), Some(gateway_ip)) if found == a_ip => Check::pass(
-            "S6",
+            "C6",
             "alias precedence",
-            format!("exact alias wins: pg.epic-a {found}, gateway {gateway_ip}"),
+            format!("exact alias wins: {alias} {found}, gateway {gateway_ip}"),
         ),
         (Some(found), Some(gateway_ip)) if found == gateway_ip => Check::pass(
-            "S6",
+            "C6",
             "alias precedence",
-            format!("subtree alias shadows the role: pg.epic-a → {found} (gateway), Postgres {a_ip}"),
+            format!("subtree alias shadows the role: {alias} → {found} (gateway), Postgres {a_ip}"),
         ),
         (Some(found), gateway_ip) => Check::pass(
-            "S6",
+            "C6",
             "alias precedence",
-            format!("pg.epic-a → {found}; gateway {gateway_ip:?}"),
+            format!("{alias} → {found}; gateway {gateway_ip:?}"),
         ),
         (None, gateway_ip) => Check::fail(
-            "S6",
+            "C6",
             "alias precedence",
-            format!("pg.epic-a stopped resolving with the subtree alias present; gateway {gateway_ip:?}"),
+            format!(
+                "{alias} stopped resolving with the subtree alias present; gateway {gateway_ip:?}"
+            ),
         ),
     }
 }
@@ -399,23 +402,23 @@ fn check_mounts_and_env(temp: &Path, names: &mut Vec<String>) -> Check {
     let probe = mount.join("probe.txt");
     if let Err(error) = std::fs::create_dir_all(&mount) {
         return Check::fail(
-            "S7",
+            "C7",
             "mounts and env",
             format!("cannot create the mount: {error}"),
         );
     }
     if let Err(error) = std::fs::write(&probe, "msbx-probe") {
         return Check::fail(
-            "S7",
+            "C7",
             "mounts and env",
             format!("cannot write the probe: {error}"),
         );
     }
-    let env_file = match write_file(temp, "probe.env", "SPIKE_MARK=msbx-env\n") {
+    let env_file = match write_file(temp, "probe.env", "INIT_MARK=msbx-env\n") {
         Ok(path) => path,
         Err(error) => {
             return Check::fail(
-                "S7",
+                "C7",
                 "mounts and env",
                 format!("cannot write the env file: {error}"),
             )
@@ -441,20 +444,20 @@ fn check_mounts_and_env(temp: &Path, names: &mut Vec<String>) -> Check {
             ALPINE_IMAGE,
             "sh",
             "-c",
-            "cat /work/probe.txt && printf '|' && printenv SPIKE_MARK",
+            "cat /work/probe.txt && printf '|' && printenv INIT_MARK",
         ],
     );
     let combined = format!("{}{}", out.stdout, out.stderr);
     let ok = out.ok && out.stdout.contains("msbx-probe|msbx-env");
     if ok {
         Check::pass(
-            "S7",
+            "C7",
             "mounts and env",
             "-v read-only mount and --env-file both visible",
         )
     } else {
         Check::fail(
-            "S7",
+            "C7",
             "mounts and env",
             format!(
                 "-v/--env-file did not behave as assumed: {}",
@@ -500,7 +503,7 @@ fn finish(checks: &[Check], temp: &Path, names: &[String], keep: bool) -> ExitCo
         println!("{failed} failed, {skipped} skipped");
         ExitCode::from(1)
     } else if skipped > 0 {
-        println!("0 failed, {skipped} skipped — the spike is incomplete");
+        println!("0 failed, {skipped} skipped — the init run is incomplete");
         ExitCode::from(2)
     } else {
         println!("all assertions passed");

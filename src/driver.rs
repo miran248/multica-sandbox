@@ -1,4 +1,4 @@
-//! The host-side primitives the spike and `doctor` share: command capture,
+//! The host-side primitives the init checks and `doctor` share: command capture,
 //! macOS version, TCP reachability and the small amount of JSON the
 //! `container` CLI returns.
 
@@ -90,7 +90,7 @@ pub fn wait_for_tcp(address: SocketAddr, timeout: Duration) -> bool {
 }
 
 /// The first string value for `key` in a JSON document. Intentionally small:
-/// the spike reads one address out of `container inspect` and nothing else.
+/// the init checks read one address out of `container inspect` and nothing else.
 pub fn json_string(json: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
     let start = json.find(&needle)? + needle.len();

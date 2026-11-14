@@ -9,7 +9,7 @@ Terms this repository uses in one specific sense.
 - **Role** — what a service does in an epic (`pg`, `pg-analytics`, `web`). A
   second instance is a second role, never a second port.
 - **Alias** — the dotted host name a container answers to
-  (`pg.signals-mir42.msbx.test`). Aliases, not container names, carry the
+  (`pg.mir42.signals.msbx.test`). Aliases, not container names, carry the
   hierarchy.
 - **Zone** — `msbx.test`, the only local DNS domain the tool maintains, served
   by Apple's embedded DNS.
@@ -18,5 +18,6 @@ Terms this repository uses in one specific sense.
 - **Driver** — the backend that creates and addresses containers. Apple
   `container` is the v1 target; the trait exists so the decision stays
   reversible.
-- **Spike** — a throwaway measurement that decides an architectural question
-  before a spec is written. Here: [MIR-179] does the Apple driver work?
+- **Init** — `msbx init`: the first-run checks on a fresh host, one check per
+  driver assumption ([MIR-179]). It prints the one privileged command
+  (`container system dns create msbx.test`) instead of running it.

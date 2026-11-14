@@ -6,7 +6,7 @@ description = "Per-epic sandbox environments for Multica work"
 license = "MIT"
 
 [[bin]]
-name = "multica-sandbox"
+name = "msbx"
 path = "src/main.rs"
 
 [dependencies]
