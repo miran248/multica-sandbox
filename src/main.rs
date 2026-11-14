@@ -15,10 +15,14 @@ const USAGE: &str = "\
 msbx — one sandbox namespace per epic
 
 Usage:
-  msbx doctor          Check the host: macOS, container CLI, zone files
-  msbx init [--keep]   First-run checks: toolchain, ports, names, mounts
+  msbx doctor                   Diagnose the host; changes nothing
+  msbx init [--check] [--keep]  Set up the host, then run the driver checks
   msbx --version
   msbx --help
+
+`init` starts the container system (installing the kernel on first run) and
+registers the msbx.test resolver through sudo, then runs C1-C7. `--check`
+performs no setup. `--keep` keeps the containers the checks created.
 
 Exit codes for init: 0 all checks passed, 1 a check failed,
 2 one or more checks were skipped.

@@ -4,7 +4,7 @@ use crate::driver;
 use std::path::Path;
 use std::process::ExitCode;
 
-const RESOLVER: &str = "/etc/resolver/msbx.test";
+const ZONE: &str = "msbx.test";
 const RETIRED_RESOLVER: &str = "/etc/resolver/test";
 
 pub fn run() -> ExitCode {
@@ -35,11 +35,10 @@ pub fn run() -> ExitCode {
     }
 
     if driver::has("container") {
-        let status = driver::run("container", &["system", "status"]);
-        let running = status.ok || driver::run("container", &["ls"]).ok;
-        if running {
+        if driver::system_running() {
             println!("[ok]   container system is running");
         } else {
+            let status = driver::run("container", &["system", "status"]);
             println!(
                 "[fail] container system is not running (`container system start`): {}",
                 one_line(&status.text())
@@ -48,11 +47,14 @@ pub fn run() -> ExitCode {
         }
     }
 
-    if Path::new(RESOLVER).exists() {
-        println!("[ok]   {RESOLVER} is installed");
+    if driver::dns_domain(ZONE) {
+        println!(
+            "[ok]   {ZONE} resolver is installed ({})",
+            driver::resolver_path(ZONE).display()
+        );
     } else {
         println!(
-            "[warn] {RESOLVER} is missing; run once: sudo container system dns create msbx.test"
+            "[warn] {ZONE} resolver is missing; run `msbx init`, or: sudo container system dns create {ZONE}"
         );
         warnings += 1;
     }

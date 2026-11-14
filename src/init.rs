@@ -1,22 +1,23 @@
-//! `msbx init` — the first-run checks that prove the driver contract.
+//! `msbx init` — set up the host, then prove the driver contract.
 //!
-//! Seven checks, run against the real `container` CLI. Every check prints what
-//! it observed; a skipped check makes the run incomplete (exit 2), never a
-//! pass. The tool runs no `sudo`; the one privileged command is printed for
-//! the operator.
+//! `init` is idempotent: it starts the `container` system (installing the
+//! kernel on first run) and registers the `msbx.test` resolver through `sudo`,
+//! then runs seven checks against the real `container` CLI. Every check prints
+//! what it observed; a skipped check makes the run incomplete (exit 2), never
+//! a pass. `--check` performs no setup and only measures.
 
 use crate::driver;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 const PROJECT: &str = "demo";
 const ZONE: &str = "msbx.test";
 const PG_IMAGE: &str = "docker.io/library/postgres:16-alpine";
 const ALPINE_IMAGE: &str = "docker.io/library/alpine:3.20";
-const RESOLVER: &str = "/etc/resolver/msbx.test";
 const PG_PORT: u16 = 5432;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,25 +71,240 @@ fn container_for(epic: &str) -> String {
     format!("{PROJECT}-{epic}-pg")
 }
 
+/// What `init` found or made on the host; `C1` reports it. `None` means the
+/// step was never probed because an earlier one failed.
+struct Host {
+    macos: String,
+    macos_ok: bool,
+    container: Option<String>,
+    system: Option<bool>,
+    resolver: Option<bool>,
+}
+
+impl Host {
+    /// Everything the checks after C1 need. The resolver is part of it: without
+    /// names there is no point creating containers.
+    fn ready(&self) -> bool {
+        self.macos_ok
+            && self.container.is_some()
+            && self.system == Some(true)
+            && self.resolver == Some(true)
+    }
+
+    fn check(&self) -> Check {
+        let mut parts = vec![format!("macOS {}", self.macos)];
+        parts.push(match &self.container {
+            Some(version) => version.clone(),
+            None => "container missing".to_string(),
+        });
+        match self.system {
+            Some(true) => parts.push("system running".to_string()),
+            Some(false) => parts.push("system not running".to_string()),
+            None => {}
+        }
+        match self.resolver {
+            Some(true) => parts.push(format!("{ZONE} resolver installed")),
+            Some(false) => parts.push(format!("{ZONE} resolver missing")),
+            None => {}
+        }
+        let detail = parts.join(" · ");
+
+        if self.ready() {
+            return Check::pass("C1", "host", detail);
+        }
+
+        let mut why = Vec::new();
+        if !self.macos_ok {
+            why.push("macOS 26 or newer is required".to_string());
+        }
+        if self.container.is_none() {
+            why.push("`container` is not installed".to_string());
+        }
+        if self.system == Some(false) {
+            why.push("the container system is not running".to_string());
+        }
+        if self.resolver == Some(false) {
+            why.push(format!("the {ZONE} resolver is not installed"));
+        }
+        Check::fail("C1", "host", format!("{detail} — {}", why.join("; ")))
+    }
+}
+
+fn step(label: &str, subject: &str, detail: &str) {
+    let tag = format!("[{label}]");
+    println!("  {tag:<6} {subject:<9} {detail}");
+}
+
+fn setup_host(check_only: bool) -> Host {
+    let macos = driver::macos_version();
+    let major = driver::macos_major();
+    let macos_ok = major.map(|value| value >= 26).unwrap_or(false);
+    if macos_ok {
+        step("ok", "macOS", &macos);
+    } else {
+        step(
+            "fail",
+            "macOS",
+            &format!("{macos} — `init` needs macOS 26 or newer"),
+        );
+    }
+
+    if !driver::has("container") {
+        step(
+            "fail",
+            "container",
+            "not on PATH; install Apple's container CLI",
+        );
+        return Host {
+            macos,
+            macos_ok,
+            container: None,
+            system: None,
+            resolver: None,
+        };
+    }
+
+    let version = driver::run("container", &["--version"]);
+    let version = version.stdout.trim().to_string();
+    step("ok", "container", &version);
+
+    if !macos_ok {
+        return Host {
+            macos,
+            macos_ok,
+            container: Some(version),
+            system: None,
+            resolver: None,
+        };
+    }
+
+    let system = if driver::system_running() {
+        step("ok", "system", "already running");
+        Some(true)
+    } else if check_only {
+        step("skip", "system", "not running (`--check`: not started)");
+        Some(false)
+    } else {
+        step(
+            "run",
+            "system",
+            "container system start --kernel-install (first run installs the kernel)",
+        );
+        let started = driver::run_attached("container", &["system", "start", "--kernel-install"])
+            && wait_for_system(Duration::from_secs(180));
+        if started {
+            step("ok", "system", "started");
+            Some(true)
+        } else {
+            step(
+                "fail",
+                "system",
+                "did not come up; run `container system start` and read its output",
+            );
+            Some(false)
+        }
+    };
+
+    let resolver = if system != Some(true) {
+        step(
+            "skip",
+            "resolver",
+            "skipped: the container system is not running",
+        );
+        None
+    } else if driver::dns_domain(ZONE) {
+        step("ok", "resolver", &format!("{ZONE} already installed"));
+        Some(true)
+    } else if check_only {
+        step(
+            "skip",
+            "resolver",
+            &format!("{ZONE} missing (`--check`: not created); run: sudo container system dns create {ZONE}"),
+        );
+        Some(false)
+    } else if driver::is_interactive() {
+        step(
+            "run",
+            "resolver",
+            &format!("sudo container system dns create {ZONE}"),
+        );
+        let created = driver::run_attached("sudo", &["container", "system", "dns", "create", ZONE])
+            && driver::dns_domain(ZONE);
+        if created {
+            step("ok", "resolver", &format!("{ZONE} installed"));
+            Some(true)
+        } else {
+            step(
+                "fail",
+                "resolver",
+                &format!("could not install {ZONE}; run: sudo container system dns create {ZONE}"),
+            );
+            Some(false)
+        }
+    } else {
+        step(
+            "skip",
+            "resolver",
+            &format!("no terminal for sudo; run: sudo container system dns create {ZONE}"),
+        );
+        Some(false)
+    };
+
+    Host {
+        macos,
+        macos_ok,
+        container: Some(version),
+        system,
+        resolver,
+    }
+}
+
+fn wait_for_system(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if driver::system_running() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(Duration::from_millis(500));
+    }
+}
+
+fn skip_rest(checks: &mut Vec<Check>) {
+    for (id, title) in [
+        ("C2", "ports"),
+        ("C3", "host reachability"),
+        ("C4", "names"),
+        ("C5", "cross-container"),
+        ("C6", "alias precedence"),
+        ("C7", "mounts and env"),
+    ] {
+        checks.push(Check::skip(id, title, "skipped: C1 did not pass"));
+    }
+}
+
 pub fn run(args: &[String]) -> ExitCode {
     let keep = args.iter().any(|arg| arg == "--keep");
+    let check_only = args.iter().any(|arg| arg == "--check");
     let temp = std::env::temp_dir().join(format!("msbx-init-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp);
 
     let mut checks: Vec<Check> = Vec::new();
     let mut names: Vec<String> = Vec::new();
 
-    if !check_toolchain(&mut checks) {
-        for (id, title) in [
-            ("C2", "ports"),
-            ("C3", "host reachability"),
-            ("C4", "names"),
-            ("C5", "cross-container"),
-            ("C6", "alias precedence"),
-            ("C7", "mounts and env"),
-        ] {
-            checks.push(Check::skip(id, title, "skipped: C1 did not pass"));
-        }
+    println!(
+        "msbx init{}
+",
+        if check_only { " (check only)" } else { "" }
+    );
+
+    let host = setup_host(check_only);
+    checks.push(host.check());
+
+    if !host.ready() {
+        skip_rest(&mut checks);
         return finish(&checks, &temp, &names, keep);
     }
 
@@ -166,7 +382,7 @@ pub fn run(args: &[String]) -> ExitCode {
 
     checks.push(check_reachability(&started));
 
-    let zone_installed = Path::new(RESOLVER).exists();
+    let zone_installed = driver::dns_domain(ZONE);
     checks.push(if zone_installed {
         let mut parts = Vec::new();
         let mut ok = true;
@@ -198,7 +414,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Check::skip(
             "C4",
             "names",
-            format!("{RESOLVER} is missing; run once: sudo container system dns create {ZONE}"),
+            format!("the {ZONE} resolver is not installed; run: sudo container system dns create {ZONE}"),
         )
     });
 
@@ -207,50 +423,6 @@ pub fn run(args: &[String]) -> ExitCode {
     checks.push(check_mounts_and_env(&temp, &mut names));
 
     finish(&checks, &temp, &names, keep)
-}
-
-fn check_toolchain(checks: &mut Vec<Check>) -> bool {
-    let version = driver::macos_version();
-    let major = driver::macos_major();
-    let cli = driver::run("container", &["--version"]);
-    let status = driver::run("container", &["system", "status"]);
-    let running = status.ok || driver::run("container", &["ls"]).ok;
-
-    let modern = major.map(|value| value >= 26).unwrap_or(false);
-    let ok = modern && cli.ok && running;
-
-    let detail = format!(
-        "macOS {} · container {} · system {}",
-        if version.is_empty() {
-            "unknown"
-        } else {
-            version.as_str()
-        },
-        if cli.stdout.trim().is_empty() {
-            "missing"
-        } else {
-            cli.stdout.trim()
-        },
-        if running { "running" } else { "not running" }
-    );
-
-    checks.push(if ok {
-        Check::pass("C1", "toolchain", detail)
-    } else {
-        let mut why = Vec::new();
-        if !modern {
-            why.push("macOS 26 or newer is required");
-        }
-        if !cli.ok {
-            why.push("`container` is not installed");
-        }
-        if !running {
-            why.push("run `container system start`");
-        }
-        Check::fail("C1", "toolchain", format!("{detail} — {}", why.join("; ")))
-    });
-
-    ok
 }
 
 fn check_reachability(started: &[(&'static str, Ipv4Addr)]) -> Check {

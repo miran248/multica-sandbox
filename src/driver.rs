@@ -59,6 +59,44 @@ pub fn has(program: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Is the `container` service running?
+pub fn system_running() -> bool {
+    run("container", &["system", "status"]).ok || run("container", &["ls"]).ok
+}
+
+/// Where Apple's embedded DNS keeps the resolver file for `zone`. The domain
+/// lives in the file's `domain` line; the `containerization.` prefix is what
+/// `container system dns create` names it.
+pub fn resolver_path(zone: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/etc/resolver/containerization.{zone}"))
+}
+
+/// Is `zone` registered with Apple's embedded DNS? Asks the CLI first, then
+/// falls back to the resolver file.
+pub fn dns_domain(zone: &str) -> bool {
+    let listed = run("container", &["system", "dns", "list", "--quiet"]);
+    if listed.ok && listed.stdout.lines().any(|line| line.trim() == zone) {
+        return true;
+    }
+    resolver_path(zone).exists()
+}
+
+/// Can this process ask for a password? `init` runs `sudo` only when it can.
+pub fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Run attached to the terminal: `sudo` needs it, and `container system start`
+/// shows its kernel download there. Returns whether the child succeeded.
+pub fn run_attached(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 /// The macOS major version, or `None` when `sw_vers` is unavailable.
 pub fn macos_major() -> Option<u32> {
     let out = run("sw_vers", &["-productVersion"]);
@@ -137,5 +175,13 @@ mod tests {
     #[test]
     fn rejects_a_mac_address() {
         assert_eq!(ipv4_of("aa:bb:cc:dd:ee:ff"), None);
+    }
+
+    #[test]
+    fn resolver_path_matches_apple_container_naming() {
+        assert_eq!(
+            resolver_path("msbx.test"),
+            std::path::PathBuf::from("/etc/resolver/containerization.msbx.test")
+        );
     }
 }

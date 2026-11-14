@@ -18,6 +18,7 @@ Terms this repository uses in one specific sense.
 - **Driver** — the backend that creates and addresses containers. Apple
   `container` is the v1 target; the trait exists so the decision stays
   reversible.
-- **Init** — `msbx init`: the first-run checks on a fresh host, one check per
-  driver assumption ([MIR-179]). It prints the one privileged command
-  (`container system dns create msbx.test`) instead of running it.
+- **Init** — `msbx init`: the idempotent first-run setup on a fresh host. It
+  starts the container system (installing the kernel on first run), registers
+  `msbx.test` through `sudo container system dns create msbx.test`, then runs
+  the C1–C7 checks ([MIR-179]). `--check` measures without changing the host.

@@ -47,6 +47,9 @@ cargo run -- doctor
 cargo run -- init
 ```
 
-`msbx init` is the first-run check on a fresh host: it needs macOS 26 and
-`container system start`, prints the one privileged command it does not run,
-and exits non-zero when a check fails or is skipped.
+`msbx init` is the first command on a fresh host, and it is idempotent: it
+starts the `container` system (installing the kernel on first run), registers
+the `msbx.test` resolver with `sudo container system dns create msbx.test`,
+then runs C1–C7 and exits non-zero when a check fails or is skipped. `--check`
+performs no setup and only measures; `--keep` leaves the check containers in
+place. It needs macOS 26 and a terminal for the sudo prompt.
