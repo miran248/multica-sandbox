@@ -1,8 +1,9 @@
-//! `msbx-run` — the Multica runtime profile's harness wrapper.
+//! `msbx-run` — the Multica runtime profile's container shim.
 //!
-//! It starts the scope's box when the checkout carries a manifest, exports the
-//! rendered envelope and execs the real harness with the original arguments and
-//! stdin. See [`multica_sandbox::wrapper`].
+//! It resolves the scope and the project, takes a lease, starts the scope's box
+//! when the checkout carries a manifest, seeds the agent dir and runs Pi in one
+//! container from the pinned image with the original arguments, stdin, stdout,
+//! stderr and exit status. See [`multica_sandbox::wrapper`].
 
 #![forbid(unsafe_code)]
 

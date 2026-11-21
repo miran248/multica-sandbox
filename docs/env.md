@@ -107,11 +107,11 @@ host-side substitution, not Compose interpolation, so the result is literal.
 
 ## The envelopes
 
-`env/harness.env` is what the shim exports to the harness container:
-`MSBX_<ROLE>_HOST` and `MSBX_<ROLE>_PORT` for every published role (container
-ports), every value listed under any `x-msbx.env` role, every declared secret's
-value under its own name, and every name in the harness store. `<NAME>_FILE`
-does not appear here: the container gets the value instead.
+`env/harness.env` is what the shim passes to the harness container as
+`--env-file`: `MSBX_<ROLE>_HOST` and `MSBX_<ROLE>_PORT` for every published role
+(container ports), every value listed under any `x-msbx.env` role, every
+declared secret's value under its own name, and every name in the harness store.
+`<NAME>_FILE` does not appear here: the container gets the value instead.
 
 `env/host.env` is shell-safe `export NAME='value'` lines for a host shell: the
 same names with the assigned loopback ports, `<NAME>_FILE` for every declared

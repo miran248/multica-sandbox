@@ -607,6 +607,61 @@ services:
 }
 
 #[test]
+fn up_marks_a_box_lease_managed_only_when_a_lease_is_named() {
+    let fixture = Fixture::new("lease-managed");
+    assert_ok(&fixture.up(&["up", "--scope", "mir-42"]));
+    assert_eq!(
+        fixture.entry("signals-mir-42")["lease_managed"].as_bool(),
+        Some(false),
+        "a manual up leaves the box up"
+    );
+
+    assert_ok(&fixture.up(&["up", "--scope", "mir-42", "--lease", "task-1"]));
+    assert_eq!(
+        fixture.entry("signals-mir-42")["lease_managed"].as_bool(),
+        Some(true),
+        "up --lease makes the last lease stop the box"
+    );
+}
+
+#[test]
+fn status_reports_the_live_leases_without_dropping_them() {
+    let fixture = Fixture::new("status-leases");
+    assert_ok(&fixture.up(&["up", "--scope", "mir-42", "--lease", "here"]));
+    let dir = fixture
+        .state_home
+        .join("msbx")
+        .join("leases")
+        .join("signals")
+        .join("mir-42");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("here.json"),
+        format!(
+            "{{\"task\":\"here\",\"pid\":{},\"started_at\":{},\"container\":\"signals-mir-42-harness-here\"}}\n",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        ),
+    )
+    .unwrap();
+
+    let output = fixture.up(&["status", "--scope", "mir-42", "--json"]);
+    assert_ok(&output);
+    let report: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(
+        report["boxes"][0]["leases"][0]["task"].as_str(),
+        Some("here")
+    );
+    assert!(
+        dir.join("here.json").is_file(),
+        "status reports, it changes nothing"
+    );
+}
+
+#[test]
 fn status_reports_services_health_and_ports_as_json() {
     let fixture = Fixture::new("status");
     assert_ok(&fixture.up(&["up", "--scope", "mir-42"]));
@@ -745,7 +800,15 @@ fn gc_lists_the_idle_backstop_dry_and_then_sweeps_it() {
         "{}",
         stdout(&dry)
     );
-    assert!(fixture.log().is_empty(), "a dry run runs no docker command");
+    // A dry run may read Docker (to list orphan harness containers) but never
+    // changes one.
+    let dry_log = fixture.log();
+    for verb in ["down", "stop", " rm ", "rm -f", "up -d"] {
+        assert!(
+            !dry_log.contains(verb),
+            "a dry run changes nothing: {dry_log}"
+        );
+    }
     assert_eq!(
         fixture.entry("signals-mir-42")["last_used"].as_u64(),
         Some(1)
@@ -792,7 +855,13 @@ fn gc_removes_a_final_ticket_scope_whatever_its_idle_time() {
     let text = stdout(&dry);
     assert!(text.contains("would remove signals-mir-42"), "{text}");
     assert!(text.contains("the issue is done"), "{text}");
-    assert!(fixture.log().is_empty(), "a dry run runs no docker command");
+    let dry_log = fixture.log();
+    for verb in ["down", "stop", " rm ", "rm -f", "up -d"] {
+        assert!(
+            !dry_log.contains(verb),
+            "a dry run changes nothing: {dry_log}"
+        );
+    }
     assert!(
         fixture.envelope_dir("mir-42").exists(),
         "a dry run changes nothing"

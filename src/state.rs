@@ -51,6 +51,10 @@ pub struct Entry {
     pub published: Vec<PublishedPort>,
     #[serde(default)]
     pub tunnels: Vec<TunnelRecord>,
+    /// Whether a lease started this box. A manual `up` leaves it false, so the
+    /// last shim lease does not stop a box a human started.
+    #[serde(default)]
+    pub lease_managed: bool,
 }
 
 /// A role published from the host and the block port it was given.
@@ -144,6 +148,23 @@ pub fn harness_env_file() -> PathBuf {
 /// `gc` and `rm` remove the directory with the box.
 pub fn leases_dir(project: &str, scope: &str) -> PathBuf {
     state_dir().join("leases").join(project).join(scope)
+}
+
+/// `$XDG_STATE_HOME/msbx/agents/<agent-id>/pi` — the persistent per-agent Pi
+/// home, mounted at `/home/agent/.pi`. Never the host's real `~/.pi`.
+pub fn agent_dir(agent_id: &str) -> PathBuf {
+    state_dir().join("agents").join(agent_id).join("pi")
+}
+
+/// `$XDG_STATE_HOME/msbx/agents/<agent-id>` — the parent of [`agent_dir`], so a
+/// seed can be staged and renamed into place.
+pub fn agents_dir(agent_id: &str) -> PathBuf {
+    state_dir().join("agents").join(agent_id)
+}
+
+/// `$XDG_STATE_HOME/msbx/cache` — probe output cached by image digest.
+pub fn cache_dir() -> PathBuf {
+    state_dir().join("cache")
 }
 
 /// The scratch directory one `init` run owns. It is under the state directory,
@@ -390,12 +411,14 @@ mod tests {
                     via: "cloudflared".to_string(),
                     upstream: "search.internal.example.com:9200".to_string(),
                 }],
+                lease_managed: true,
             },
         );
         store.save(&state).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.blocks["mir-901"].start, 23000);
         assert_eq!(loaded.blocks["mir-901"].published[0].role, "pg");
+        assert!(loaded.blocks["mir-901"].lease_managed);
         let _ = fs::remove_dir_all(&dir);
     }
 
