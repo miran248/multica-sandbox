@@ -45,7 +45,8 @@ pinned image are stages 3 and 4, and the release promotes the branch into
   idle days.
 - **State only, not code** — the box has services, volumes, ports and names.
   The app process runs in the harness container. `msbx` refuses a bind of the
-  checkout root and a service `build:` inside the checkout.
+  checkout root or an ancestor of it, and a service `build:` inside or containing
+  the checkout.
 - **Names, not fixed ports** — `<role>.<scope>.<project>.msbx.test` served by
   the `msbx dns` resolver, with a stable loopback port per published role from
   the scope's block.
@@ -182,7 +183,7 @@ msbx down [--scope S]                          # stop it, keep its volumes
 msbx rm [--scope S] [--yes]                    # destroy it, free its block
 msbx status [--scope S] [--json]               # services and ports
 msbx env ls|export [--scope S]                 # names, or exports for a host shell
-msbx gc [--dry-run]                            # final state, idle backstop, orphans
+msbx gc [--dry-run]                            # final-state and idle sweep
 msbx doctor                                    # describe the Docker host and the pin
 msbx init [--check] [--keep]                   # install the resolver, run C1-C7
 msbx image build|pin|show                      # the harness image

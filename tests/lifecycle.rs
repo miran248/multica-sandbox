@@ -182,8 +182,9 @@ impl Fixture {
         let dir = self.root.join("multica");
         fs::create_dir_all(&dir).unwrap();
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = issue ] && [ \"$2\" = get ]; then\n  if [ -f '{}/fail' ]; then echo 'multica: not found' >&2; exit 1; fi\n  if [ -f \"{}/$3.json\" ]; then cat \"{}/$3.json\"; exit 0; fi\n  printf '%s\\n' '{{\"identifier\":\"MIR-42\",\"status_category\":\"in_progress\",\"archived_at\":null}}'\n  exit 0\nfi\necho \"multica: cannot resolve $*\" >&2\nexit 1\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = issue ] && [ \"$2\" = get ]; then\n  if [ -f '{}/offline' ]; then echo 'multica: offline: connection refused' >&2; exit 7; fi\n  if [ -f '{}/fail' ]; then echo 'The requested resource was not found.' >&2; exit 4; fi\n  if [ -f \"{}/$3.json\" ]; then cat \"{}/$3.json\"; exit 0; fi\n  printf '%s\\n' '{{\"identifier\":\"MIR-42\",\"status_category\":\"in_progress\",\"archived_at\":null}}'\n  exit 0\nfi\necho \"multica: cannot resolve $*\" >&2\nexit 1\n",
             self.root.join("multica.log").display(),
+            dir.display(),
             dir.display(),
             dir.display(),
             dir.display(),
@@ -201,6 +202,12 @@ impl Fixture {
         let dir = self.root.join("multica");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("fail"), "").unwrap();
+    }
+
+    fn offline_multica(&self) {
+        let dir = self.root.join("multica");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("offline"), "").unwrap();
     }
 
     fn up(&self, args: &[&str]) -> Output {
@@ -872,6 +879,44 @@ fn multica_now() -> u64 {
 }
 
 #[test]
+fn a_transient_lookup_failure_keeps_the_box_loudly() {
+    let fixture = Fixture::new("gc-transient");
+    assert_ok(&fixture.up(&["up", "--scope", "mir-42"]));
+    fixture.offline_multica();
+
+    fixture.clear_log();
+    let dry = fixture.up(&["gc", "--dry-run"]);
+    assert!(!dry.status.success());
+    assert!(
+        stderr(&dry).contains("cannot check the issue"),
+        "{}",
+        stderr(&dry)
+    );
+    assert!(fixture.log().is_empty(), "no docker command was run");
+    assert_eq!(
+        fixture.state()["blocks"].as_object().unwrap().len(),
+        1,
+        "a transient failure is not `gone`"
+    );
+    assert!(fixture.envelope_dir("mir-42").exists());
+
+    let swept = fixture.up(&["gc"]);
+    assert!(!swept.status.success());
+    assert_eq!(fixture.state()["blocks"].as_object().unwrap().len(), 1);
+    assert!(fixture.envelope_dir("mir-42").exists());
+
+    let up = fixture.up(&["up", "--scope", "mir-42"]);
+    assert!(!up.status.success());
+    assert!(
+        stderr(&up).contains("cannot check the issue"),
+        "{}",
+        stderr(&up)
+    );
+    assert_eq!(fixture.state()["blocks"].as_object().unwrap().len(), 1);
+    assert!(fixture.envelope_dir("mir-42").exists());
+}
+
+#[test]
 fn up_makes_the_final_check_and_removes_a_final_boxes_state() {
     let fixture = Fixture::new("up-final");
     assert_ok(&fixture.up(&["up", "--scope", "mir-42"]));
@@ -933,23 +978,62 @@ services:
 }
 
 #[test]
-fn up_refuses_a_build_inside_the_checkout() {
-    let fixture = Fixture::new("state-build");
+fn up_refuses_an_ancestor_or_unresolvable_bind() {
+    let fixture = Fixture::new("state-ancestor");
+    for (source, expected) in [
+        ("..:/work", "ancestor"),
+        ("../:/work", "ancestor"),
+        ("${PWD}:/work", "ancestor"),
+        ("$PWD/..:/work", "ancestor"),
+        ("${HOME}:/work", "ancestor"),
+        ("${DATA_DIR}/x:/work", "cannot resolve"),
+    ] {
+        fixture.write_manifest(&format!(
+            "x-msbx:\n  project: signals\nservices:\n  client:\n    image: alpine:3.20\n    volumes:\n      - {source}\n"
+        ));
+        let output = fixture.up(&["up", "--scope", "mir-42"]);
+        assert!(!output.status.success(), "{source} was accepted");
+        let message = stderr(&output);
+        assert!(
+            message.contains(expected),
+            "{source}: expected `{expected}` in {message}"
+        );
+        assert!(fixture.log().is_empty(), "{source} started docker");
+        assert!(!fixture.state_path().exists(), "{source} allocated a block");
+    }
+
     fixture.write_manifest(
-        r#"x-msbx:
-  project: signals
-services:
-  web:
-    build: .
-"#,
+        "x-msbx:\n  project: signals\nservices:\n  client:\n    image: alpine:3.20\n    volumes:\n      - type: bind\n        source: ..\n        target: /work\n",
     );
-    let output = fixture.up(&["up", "--scope", "mir-42"]);
-    assert!(!output.status.success());
-    let message = stderr(&output);
-    assert!(message.contains("inside the checkout"), "{message}");
-    assert!(message.contains("harness container"), "{message}");
-    assert!(fixture.log().is_empty(), "no container command was run");
-    assert!(!fixture.state_path().exists(), "no block was allocated");
+    let long = fixture.up(&["up", "--scope", "mir-42"]);
+    assert!(!long.status.success());
+    assert!(stderr(&long).contains("ancestor"), "{}", stderr(&long));
+
+    // A subpath through the same interpolation is still state only.
+    fixture.write_manifest(
+        "x-msbx:\n  project: signals\nservices:\n  client:\n    image: alpine:3.20\n    volumes:\n      - ${PWD}/init.sql:/docker-entrypoint-initdb.d/init.sql:ro\n",
+    );
+    assert_ok(&fixture.up(&["up", "--scope", "mir-42"]));
+}
+
+#[test]
+fn up_refuses_a_build_inside_or_containing_the_checkout() {
+    let fixture = Fixture::new("state-build");
+    for context in [".", ".."] {
+        fixture.write_manifest(&format!(
+            "x-msbx:\n  project: signals\nservices:\n  web:\n    build: {context}\n"
+        ));
+        let output = fixture.up(&["up", "--scope", "mir-42"]);
+        assert!(!output.status.success(), "{context} was accepted");
+        let message = stderr(&output);
+        assert!(message.contains("the checkout"), "{context}: {message}");
+        assert!(
+            message.contains("harness container"),
+            "{context}: {message}"
+        );
+        assert!(fixture.log().is_empty(), "no container command was run");
+        assert!(!fixture.state_path().exists(), "no block was allocated");
+    }
 
     // A build context outside the checkout is still a published image.
     fixture.write_manifest(

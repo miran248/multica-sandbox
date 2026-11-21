@@ -8,6 +8,7 @@
 //! `project`.
 
 use crate::ports::Block;
+use crate::state;
 use serde_yaml_ng::{Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -200,25 +201,45 @@ impl Manifest {
     }
 
     /// The box is state, not code. `up` refuses a service volume whose source is
-    /// the checkout root and a service `build:` whose context is inside the
-    /// checkout, before it allocates a block or starts a container.
+    /// the checkout root or an ancestor of it (which exposes the checkout), and
+    /// a service `build:` whose context is inside the checkout, before it
+    /// allocates a block or starts a container. `$PWD`/`${PWD}` and
+    /// `$HOME`/`${HOME}` are expanded; any other interpolation in a path source
+    /// is refused rather than guessed.
     pub fn check_state_only(&self, root: &Path) -> Result<(), ManifestError> {
         let root = std::fs::canonicalize(root).unwrap_or_else(|_| lexical(root));
+        let home = std::fs::canonicalize(state::home()).unwrap_or_else(|_| state::home());
         for (role, sources) in &self.volume_sources {
             for source in sources {
-                if resolve_path(&root, source) == root {
+                let expanded = expand_vars(source, &root, &home).map_err(|reason| {
+                    ManifestError::new(format!(
+                        "`services.{role}.volumes` source `{source}` {reason}; use a literal path so the checkout cannot be exposed"
+                    ))
+                })?;
+                if !is_path_source(&expanded) {
+                    // A named volume carries no host path.
+                    continue;
+                }
+                let path = resolve_path(&root, &expanded);
+                if path == root || root.starts_with(&path) {
                     return Err(ManifestError::new(format!(
-                        "`services.{role}.volumes` binds the checkout root {}; the box is state only, and mounting the checkout would make two scopes share code (mount a subpath instead)",
+                        "`services.{role}.volumes` binds the checkout root or an ancestor of it (`{source}` → {}; checkout {}); the box is state only, and mounting the checkout would make two scopes share code (mount a subpath instead)",
+                        path.display(),
                         root.display()
                     )));
                 }
             }
         }
         for (role, context) in &self.build_contexts {
-            let context = resolve_path(&root, context);
-            if context == root || context.starts_with(&root) {
+            let expanded = expand_vars(context, &root, &home).map_err(|reason| {
+                ManifestError::new(format!(
+                    "`services.{role}.build` context `{context}` {reason}; use a literal path so the checkout cannot be built"
+                ))
+            })?;
+            let context = resolve_path(&root, &expanded);
+            if context == root || context.starts_with(&root) || root.starts_with(&context) {
                 return Err(ManifestError::new(format!(
-                    "`services.{role}.build` uses the build context {}, inside the checkout; a live-code service is out of scope, and the app process runs in the harness container (publish an image instead)",
+                    "`services.{role}.build` uses the build context {}, inside or containing the checkout; a live-code service is out of scope, and the app process runs in the harness container (publish an image instead)",
                     context.display()
                 )));
             }
@@ -312,9 +333,10 @@ fn parse_services(root: &Mapping) -> Result<Services, ManifestError> {
     Ok(parsed)
 }
 
-/// The path-shaped sources of a service's `volumes`. A named volume has no
-/// source path and is not a bind. Both the short `source:target[:mode]` form and
-/// the long `{type: bind, source: …}` form are read.
+/// The source of a service's volumes. A named volume has no source path and is
+/// not a bind; `check_state_only` decides that after interpolation. Both the
+/// short `source:target[:mode]` form and the long `{type: bind, source: …}` form
+/// are read.
 fn parse_volume_sources(role: &str, volumes: &Value) -> Result<Vec<String>, ManifestError> {
     let list = volumes
         .as_sequence()
@@ -328,7 +350,8 @@ fn parse_volume_sources(role: &str, volumes: &Value) -> Result<Vec<String>, Mani
                 let source = fields.next().unwrap_or_default();
                 fields
                     .next()
-                    .and_then(|_| is_path_source(source).then(|| source.to_string()))
+                    .filter(|_| !source.is_empty())
+                    .map(|_| source.to_string())
             }
             Value::Mapping(entry) => {
                 let bind = entry
@@ -350,6 +373,25 @@ fn parse_volume_sources(role: &str, volumes: &Value) -> Result<Vec<String>, Mani
         }
     }
     Ok(sources)
+}
+
+/// Expand the interpolation this check can decide: `$PWD`/`${PWD}` is the
+/// checkout root and `$HOME`/`${HOME}` is the host home. Anything else is
+/// refused, because a path this check cannot resolve might be the checkout.
+fn expand_vars(source: &str, root: &Path, home: &Path) -> Result<String, &'static str> {
+    let root = root.to_string_lossy();
+    let home = home.to_string_lossy();
+    let expanded = source
+        .replace("${PWD}", &root)
+        .replace("$PWD", &root)
+        .replace("${HOME}", &home)
+        .replace("$HOME", &home);
+    if expanded.contains('$') {
+        return Err(
+            "uses interpolation this check cannot resolve (`$PWD`/`${PWD}` and `$HOME`/`${HOME}` only)",
+        );
+    }
+    Ok(expanded)
 }
 
 /// A source is a path when Compose would treat it as one: an absolute path, or
@@ -849,6 +891,46 @@ services:
     }
 
     #[test]
+    fn an_ancestor_or_interpolated_bind_is_refused() {
+        let root = Path::new("/home/me/signals");
+        for (source, expected) in [
+            ("../:/work", "ancestor"),
+            ("$PWD/..:/work", "ancestor"),
+            ("${DATA_DIR}/x:/work", "cannot resolve"),
+        ] {
+            let text = format!(
+                "x-msbx:\n  project: signals\nservices:\n  web:\n    image: alpine\n    volumes:\n      - {source}\n"
+            );
+            let error = Manifest::parse(&text)
+                .unwrap()
+                .check_state_only(root)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "{source}: expected `{expected}` in {error}"
+            );
+        }
+
+        let home = std::fs::canonicalize(state::home()).unwrap();
+        let root = home.join("signals");
+        for source in ["${HOME}:/work", "$HOME:/work", "${HOME}/signals:/work"] {
+            let text = format!(
+                "x-msbx:\n  project: signals\nservices:\n  web:\n    image: alpine\n    volumes:\n      - {source}\n"
+            );
+            let error = Manifest::parse(&text)
+                .unwrap()
+                .check_state_only(&root)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("ancestor") || error.contains("checkout root"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn a_named_volume_and_a_subpath_are_allowed() {
         let root = Path::new("/home/me/signals");
         let text = "x-msbx:\n  project: signals\nservices:\n  web:\n    image: alpine\n    volumes:\n      - data:/var/lib/data\n      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro\n";
@@ -861,7 +943,7 @@ services:
     #[test]
     fn a_build_context_inside_the_checkout_is_refused() {
         let root = Path::new("/home/me/signals");
-        for context in [".", "./", "./sub"] {
+        for context in [".", "./", "./sub", ".."] {
             let text =
                 format!("x-msbx:\n  project: signals\nservices:\n  web:\n    build: {context}\n");
             let error = Manifest::parse(&text)
@@ -869,7 +951,10 @@ services:
                 .check_state_only(root)
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("inside the checkout"), "{text}: {error}");
+            assert!(
+                error.contains("build context") && error.contains("checkout"),
+                "{text}: {error}"
+            );
         }
         let outside = "x-msbx:\n  project: signals\nservices:\n  web:\n    build:\n      context: ../shared\n";
         assert!(Manifest::parse(outside)

@@ -67,8 +67,8 @@ const GC_USAGE: &str = "\
 usage: msbx gc [--dry-run]
 
 The lifecycle sweep: remove a final ticket box (the issue is done, cancelled,
-archived or gone), a chat box idle for 2 days, a ticket box idle for 14 days,
-stale leases and orphan harness containers. `--dry-run` only lists them.
+archived or gone), a chat box idle for 2 days and a ticket box idle for 14 days.
+`--dry-run` only lists them.
 ";
 const ENV_USAGE: &str = "\
 usage: msbx env ls|export [--scope S] [--project P]
@@ -551,8 +551,9 @@ enum Finality {
 }
 
 /// A chat scope is never final on the tracker; a ticket scope is final when the
-/// issue is done, cancelled, archived or gone. A failed lookup is "gone" — the
-/// box must not outlive a ticket the CLI can no longer find.
+/// issue is done, cancelled, archived or gone. "Gone" is only a not-found
+/// answer: any other failure of the lookup is a loud error, so a transient CLI
+/// or network problem never destroys a box.
 fn finality(scope: &str) -> Result<Finality, Failure> {
     if scope.starts_with("chat-") {
         return Ok(Finality::Live);
@@ -563,10 +564,21 @@ fn finality(scope: &str) -> Result<Finality, Failure> {
         .output();
     let output = match output {
         Ok(output) => output,
-        Err(_) => return Ok(Finality::Final("the issue is gone".to_string())),
+        Err(error) => {
+            return Err(Failure::run(format!(
+                "cannot check the issue for scope `{scope}`: cannot run `{}`: {error}",
+                multica_bin().to_string_lossy()
+            )))
+        }
     };
     if !output.status.success() {
-        return Ok(Finality::Final("the issue is gone".to_string()));
+        if is_not_found(&output) {
+            return Ok(Finality::Final("the issue is gone".to_string()));
+        }
+        return Err(Failure::run(format!(
+            "cannot check the issue for scope `{scope}`: `multica issue get` failed: {}",
+            one_line(&output_text(&output))
+        )));
     }
     let issue: Issue = match serde_json::from_slice(&output.stdout) {
         Ok(issue) => issue,
@@ -581,6 +593,24 @@ fn finality(scope: &str) -> Result<Finality, Failure> {
         "cancelled" => Ok(Finality::Final("the issue is cancelled".to_string())),
         _ => Ok(Finality::Live),
     }
+}
+
+/// The not-found answer is the only failure that means "the issue is gone".
+/// The CLI exits 4 and says so; older builds only carry the text.
+fn is_not_found(output: &std::process::Output) -> bool {
+    if output.status.code() == Some(4) {
+        return true;
+    }
+    let text = output_text(output).to_ascii_lowercase();
+    text.contains("not found") || text.contains("404") || text.contains("no issue")
+}
+
+fn output_text(output: &std::process::Output) -> String {
+    format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
 }
 
 #[derive(Debug, Deserialize)]
