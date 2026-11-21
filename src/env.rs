@@ -365,10 +365,12 @@ fn expand(
         "project" => return Ok(key.project().to_string()),
         _ => {}
     }
+    // A malformed token may be a fragment of a store value, so errors name the
+    // env and the role they belong to and never repeat the token's text.
     if let Some(role) = token.strip_prefix("host:").map(str::trim) {
         if !role_exists(manifest, role) {
             return Err(EnvError::new(format!(
-                "{what}: `{{{{host:{role}}}}}` names no service or tunnel"
+                "{what}: a `{{{{host:<role>}}}}` token names no service or tunnel"
             )));
         }
         return Ok(key.alias(role));
@@ -376,7 +378,7 @@ fn expand(
     if let Some(role) = token.strip_prefix("port:").map(str::trim) {
         if !role_exists(manifest, role) {
             return Err(EnvError::new(format!(
-                "{what}: `{{{{port:{role}}}}}` names no service or tunnel"
+                "{what}: a `{{{{port:<role>}}}}` token names no service or tunnel"
             )));
         }
         return published
@@ -385,12 +387,12 @@ fn expand(
             .map(|port| port.host_port.to_string())
             .ok_or_else(|| {
                 EnvError::new(format!(
-                    "{what}: `{{{{port:{role}}}}}` names a role with no host port (not in `x-msbx.publish`)"
+                    "{what}: a `{{{{port:<role>}}}}` token names a role with no host port (not in `x-msbx.publish`)"
                 ))
             });
     }
     Err(EnvError::new(format!(
-        "{what}: `{{{{{token}}}}}` is not a known token (`host:<role>`, `port:<role>`, `epic`, `project`)"
+        "{what}: a `{{{{…}}}}` token is not known (`host:<role>`, `port:<role>`, `epic`, `project`)"
     )))
 }
 
@@ -539,7 +541,7 @@ services:
             .to_string()
         };
         assert!(
-            error("{{nope}}").contains("is not a known token"),
+            error("{{nope}}").contains("token is not known"),
             "{}",
             error("{{nope}}")
         );
@@ -562,6 +564,21 @@ services:
             error("x{{port:pg").contains("never closed"),
             "{}",
             error("x{{port:pg")
+        );
+
+        // A malformed token may be a fragment of a store value, so the message
+        // names the env and the role, never the token's text.
+        let message = error("{{sk_live_fragment}}");
+        assert!(message.contains("token is not known"), "{message}");
+        assert!(
+            !message.contains("sk_live_fragment"),
+            "the token text is not echoed: {message}"
+        );
+        let message = error("{{host:sk_live_fragment}}");
+        assert!(message.contains("names no service or tunnel"), "{message}");
+        assert!(
+            !message.contains("sk_live_fragment"),
+            "the role text is not echoed: {message}"
         );
     }
 

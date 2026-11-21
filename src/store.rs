@@ -166,7 +166,7 @@ pub(crate) fn parse_env(text: &str) -> Result<BTreeMap<String, String>, String> 
             ));
         }
         if values.insert(name.to_string(), value.to_string()).is_some() {
-            return Err(format!("`{name}` is defined twice"));
+            return Err(format!("line {number} redefines `{name}`"));
         }
     }
     Ok(values)
@@ -243,7 +243,8 @@ mod tests {
         let error = parse_env("BAD NAME=1\n").unwrap_err();
         assert!(error.contains("valid NAME"), "{error}");
         let error = parse_env("A=1\nA=2\n").unwrap_err();
-        assert!(error.contains("`A` is defined twice"), "{error}");
+        assert!(error.contains("line 2"), "{error}");
+        assert!(error.contains("`A`"), "{error}");
     }
 
     #[test]

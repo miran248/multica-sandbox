@@ -849,7 +849,7 @@ fn unknown_or_unpublished_tokens_stop_up() {
         ("{{port:ghost}}", "names no service or tunnel"),
         ("{{host:ghost}}", "names no service or tunnel"),
         ("{{port:client}}", "no host port"),
-        ("{{nope}}", "is not a known token"),
+        ("{{nope}}", "token is not known"),
     ] {
         fixture.clear_log();
         fixture.write_store_env(&format!(

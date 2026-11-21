@@ -51,6 +51,10 @@ The override gives each role with env entries an `env_file` pointing at
 Values reach Compose through those files, never through argv. Files an earlier
 render produced and this one does not are removed.
 
+`harness` is reserved as an `x-msbx.env` role name: its file would be
+`env/harness.env`, the harness envelope itself. A manifest that lists env for a
+role named `harness` is refused.
+
 ## Tokens
 
 A store value may carry `{{host:<role>}}`, `{{port:<role>}}`, `{{epic}}` and
@@ -62,7 +66,8 @@ host-side substitution, not Compose interpolation, so the result is literal.
 - `{{port:<role>}}` is the role's assigned loopback port and is an error for a
   role that is not in `x-msbx.publish`.
 - An unknown token, an unclosed `{{`, or a role that is not in the manifest is
-  an error naming the value's name and role — never the value.
+  an error naming the env and the role it belongs to — never the value, and
+  never the token's text, which may itself be a fragment of a value.
 
 ## The harness envelope
 
@@ -98,3 +103,7 @@ be evaluated (`eval "$(msbx env export --epic E)"`), not logged.
   child it starts inherits them — the same trust boundary as the agent itself.
 - Changing a value means changing the store and running `msbx up` again; `up`
   re-renders the envelope and Compose reconciles the affected containers.
+- A tunnelled role cannot declare `x-msbx.env` or `x-msbx.secrets` yet: its
+  sidecar and its env injection land with
+  [MIR-262](https://multica.ai/miran248/issues/MIR-262), and a manifest that
+  declares them is refused rather than silently ignored.

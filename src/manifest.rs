@@ -180,9 +180,11 @@ impl Manifest {
         }
         for role in self.env.keys() {
             self.require_role(role, "env")?;
+            self.require_local(role, "env")?;
         }
         for role in self.secrets.keys() {
             self.require_role(role, "secrets")?;
+            self.require_local(role, "secrets")?;
         }
         Ok(())
     }
@@ -195,6 +197,18 @@ impl Manifest {
                 "`x-msbx.{block}.{role}` names no service or tunnel"
             )))
         }
+    }
+
+    /// Env files and secret mounts are injected into a service's container.
+    /// A tunnelled role's sidecar lands with [MIR-262], so declaring its
+    /// `env` or `secrets` today would be accepted and silently ignored.
+    fn require_local(&self, role: &str, block: &str) -> Result<(), ManifestError> {
+        if self.tunnels.contains_key(role) {
+            return Err(ManifestError::new(format!(
+                "`x-msbx.{block}.{role}` names a tunnelled role; `{block}` for a tunnel lands with MIR-262"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -258,6 +272,11 @@ fn parse_names(value: &Value, block: &str) -> Result<BTreeMap<String, Vec<String
     let mut out = BTreeMap::new();
     for (key, value) in mapping {
         let role = role_name(key, block)?;
+        if block == "env" && role == "harness" {
+            return Err(ManifestError::new(format!(
+                "`x-msbx.env.{role}` would overwrite the harness envelope `env/harness.env`; name the role something else"
+            )));
+        }
         let list = value.as_sequence().ok_or_else(|| {
             ManifestError::new(format!("`x-msbx.{block}.{role}` must be a list of names"))
         })?;
@@ -551,6 +570,29 @@ services:
         let text =
             "x-msbx:\n  project: signals\n  secrets:\n    web: [../escape]\nservices:\n  web: {}\n";
         assert!(error(text).contains("must match [A-Za-z_][A-Za-z0-9_]*"));
+    }
+
+    #[test]
+    fn a_role_named_harness_cannot_declare_env_entries() {
+        let text = "x-msbx:\n  project: signals\n  env:\n    harness: [OTHER]\nservices:\n  harness: {}\n  web: {}\n";
+        let message = error(text);
+        assert!(message.contains("`x-msbx.env.harness`"), "{message}");
+        assert!(
+            message.contains("env/harness.env"),
+            "the reserved file is named: {message}"
+        );
+    }
+
+    #[test]
+    fn env_and_secrets_for_a_tunnelled_role_are_refused_until_tunnels_land() {
+        let env = "x-msbx:\n  project: signals\n  env:\n    pg: [DATABASE_URL]\n  tunnels:\n    pg:\n      host: db.example.com\n      port: 5432\n      via: ssh\nservices:\n  web: {}\n";
+        let message = error(env);
+        assert!(message.contains("`x-msbx.env.pg`"), "{message}");
+        assert!(message.contains("MIR-262"), "{message}");
+        let secrets = "x-msbx:\n  project: signals\n  secrets:\n    pg: [PASSWORD]\n  tunnels:\n    pg:\n      host: db.example.com\n      port: 5432\n      via: ssh\nservices:\n  web: {}\n";
+        let message = error(secrets);
+        assert!(message.contains("`x-msbx.secrets.pg`"), "{message}");
+        assert!(message.contains("MIR-262"), "{message}");
     }
 
     #[test]
