@@ -271,6 +271,11 @@ fn parse_names(value: &Value, block: &str) -> Result<BTreeMap<String, Vec<String
                     "`x-msbx.{block}.{role}` contains an empty or whitespace name"
                 )));
             }
+            if !valid_env_name(name) {
+                return Err(ManifestError::new(format!(
+                    "`x-msbx.{block}.{role}` name `{name}` must match [A-Za-z_][A-Za-z0-9_]* (it becomes an environment variable, a file name and a mount path)"
+                )));
+            }
             if names.iter().any(|seen| seen == name) {
                 return Err(ManifestError::new(format!(
                     "`x-msbx.{block}.{role}` lists `{name}` twice"
@@ -377,6 +382,14 @@ fn role_name(value: &Value, block: &str) -> Result<String, ManifestError> {
         )));
     }
     Ok(role.to_string())
+}
+
+/// An env or secret name becomes an environment variable, a file name and a
+/// mount path, so it stays one shell identifier.
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -528,6 +541,16 @@ services:
     fn role_names_stay_one_dns_label() {
         assert!(error("x-msbx:\n  project: signals\n  publish:\n    pg.prod: 5432\nservices:\n  pg.prod: {}\n")
             .contains("not a valid role name"));
+    }
+
+    #[test]
+    fn env_and_secret_names_stay_shell_identifiers() {
+        let text =
+            "x-msbx:\n  project: signals\n  env:\n    web: [BAD-NAME]\nservices:\n  web: {}\n";
+        assert!(error(text).contains("must match [A-Za-z_][A-Za-z0-9_]*"));
+        let text =
+            "x-msbx:\n  project: signals\n  secrets:\n    web: [../escape]\nservices:\n  web: {}\n";
+        assert!(error(text).contains("must match [A-Za-z_][A-Za-z0-9_]*"));
     }
 
     #[test]

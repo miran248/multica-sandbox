@@ -94,6 +94,21 @@ pub fn epic_dir(project: &str, epic: &str) -> PathBuf {
     state_dir().join(project).join(epic)
 }
 
+/// `$XDG_CONFIG_HOME/msbx`, defaulting to `~/.config/msbx`. Configuration, not
+/// state: it holds the project value stores and survives `rm` and `gc`.
+pub fn config_dir() -> PathBuf {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("msbx"),
+        _ => home().join(".config").join("msbx"),
+    }
+}
+
+/// `$XDG_CONFIG_HOME/msbx/projects/<project>` — the project's value store,
+/// outside every checkout. The manifest lists names; the values live here.
+pub fn store_dir(project: &str) -> PathBuf {
+    config_dir().join("projects").join(project)
+}
+
 /// The scratch directory one `init` run owns. It is under the state directory,
 /// never under a checkout, and is removed when the run finishes.
 pub fn init_dir() -> PathBuf {
@@ -262,12 +277,21 @@ pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Write `body` to `path` mode 0600, replacing any existing file.
+/// Write `body` to `path` mode 0600, replacing any existing file. A new file is
+/// created private in the same open, so a rendered value is never briefly
+/// readable by another user.
 pub fn write_private(path: &Path, body: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         create_private_dir(parent)?;
     }
-    let mut file = File::create(path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     set_private_file(&file)?;
     file.write_all(body.as_bytes())?;
     file.sync_all()

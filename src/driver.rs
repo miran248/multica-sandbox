@@ -42,7 +42,18 @@ pub fn run_in(dir: &Path, program: &str, args: &[&str]) -> Output {
 
 /// Run a program with arguments assembled at runtime.
 pub fn run_owned(program: &str, args: &[String]) -> Output {
-    run_command(Command::new(program).args(args))
+    run_owned_env(program, args, &[])
+}
+
+/// Run a program with arguments and extra environment variables. `up` uses it
+/// to hand the published roles' names and ports to the Compose process.
+pub fn run_owned_env(program: &str, args: &[String], envs: &[(String, String)]) -> Output {
+    let mut command = Command::new(program);
+    command.args(args);
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    run_command(&mut command)
 }
 
 fn run_command(command: &mut Command) -> Output {
