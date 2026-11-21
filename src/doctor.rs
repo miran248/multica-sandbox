@@ -9,6 +9,7 @@
 use crate::dns;
 use crate::driver;
 use crate::platform;
+use crate::ports::{Allocator, Block};
 use std::process::ExitCode;
 
 const ZONE: &str = platform::ZONE;
@@ -123,6 +124,24 @@ pub fn run() -> ExitCode {
             warnings += 1;
         }
         None => {}
+    }
+
+    match Allocator::default_path().store().load() {
+        Ok(state) if state.blocks.is_empty() => println!("[ok]   no scope boxes recorded"),
+        Ok(state) => {
+            println!("[ok]   {} scope box(es) recorded", state.blocks.len());
+            for (key, entry) in &state.blocks {
+                let block = Block { start: entry.start };
+                println!(
+                    "         {key}  scope {}  block {block}",
+                    entry.scope.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        Err(error) => {
+            println!("[warn] cannot read the box state: {error}");
+            warnings += 1;
+        }
     }
 
     for leftover in platform::leftovers() {

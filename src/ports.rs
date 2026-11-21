@@ -1,6 +1,6 @@
-//! The per-epic loopback port block.
+//! The per-scope loopback port block.
 //!
-//! Every epic owns 16 consecutive `127.0.0.1` ports from 23000 upward. The
+//! Every scope owns 16 consecutive `127.0.0.1` ports from 23000 upward. The
 //! block is recorded in the state file on the first `up`, reused unchanged on
 //! later runs, and released by `gc` (or `rm`). A block is only ever handed out
 //! when all 16 ports are free to bind; a recorded block is stable even if a
@@ -12,17 +12,19 @@ use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::PathBuf;
 
-/// Ports per epic block.
+/// Ports per scope block.
 pub const BLOCK_SIZE: u16 = 16;
 /// The first port the allocator considers.
 pub const FIRST_PORT: u16 = 23000;
 /// The last port a block may reach. Kept below the ephemeral ranges on both
-/// macOS (49152) and Linux (32768) with room for many epics.
+/// macOS (49152) and Linux (32768) with room for many scopes.
 pub const LAST_PORT: u16 = 32000;
 /// `gc` releases a block after this many idle seconds (14 days).
 pub const IDLE_SECS: u64 = 14 * 24 * 60 * 60;
+/// `gc` removes a chat box after this many idle seconds (2 days).
+pub const CHAT_IDLE_SECS: u64 = 2 * 24 * 60 * 60;
 
-/// One epic's 16 ports.
+/// One scope's 16 ports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Block {
     pub start: u16,
@@ -69,7 +71,7 @@ pub enum PortError {
         first: u16,
         last: u16,
     },
-    /// An operation named an epic with no recorded block.
+    /// An operation named a scope with no recorded block.
     Unknown(String),
 }
 
@@ -173,7 +175,7 @@ impl Allocator {
                         assigned: at,
                         last_used: at,
                         project: None,
-                        epic: None,
+                        scope: None,
                         dir: None,
                         published: Vec::new(),
                         tunnels: Vec::new(),
@@ -238,9 +240,9 @@ impl Allocator {
         Ok(self.store.load()?.blocks.get(key).cloned())
     }
 
-    /// Record what the epic's block is spent on: its keys, checkout and
+    /// Record what the scope's block is spent on: its keys, checkout and
     /// published role → port mapping. `last_used` is refreshed.
-    pub fn record(&self, key: &str, meta: &EpicMeta, at: u64) -> Result<(), PortError> {
+    pub fn record(&self, key: &str, meta: &ScopeMeta, at: u64) -> Result<(), PortError> {
         let _lock = self.store.lock()?;
         let mut state = self.store.load()?;
         let entry = state
@@ -248,7 +250,7 @@ impl Allocator {
             .get_mut(key)
             .ok_or_else(|| PortError::Unknown(key.to_string()))?;
         entry.project = Some(meta.project.clone());
-        entry.epic = Some(meta.epic.clone());
+        entry.scope = Some(meta.scope.clone());
         entry.dir = Some(meta.dir.to_string_lossy().to_string());
         entry.published = meta.published.clone();
         entry.tunnels = meta.tunnels.clone();
@@ -293,11 +295,11 @@ impl Allocator {
     }
 }
 
-/// What `up` records on an epic's block.
+/// What `up` records on a scope's block.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EpicMeta {
+pub struct ScopeMeta {
     pub project: String,
-    pub epic: String,
+    pub scope: String,
     pub dir: PathBuf,
     pub published: Vec<PublishedPort>,
     pub tunnels: Vec<TunnelRecord>,
@@ -363,8 +365,8 @@ mod tests {
     #[test]
     fn allocates_consecutive_blocks() {
         let (allocator, dir) = test_allocator("consecutive", 41000);
-        let first = allocator.allocate("demo-epic-a", 10).unwrap();
-        let second = allocator.allocate("demo-epic-b", 10).unwrap();
+        let first = allocator.allocate("mir-901", 10).unwrap();
+        let second = allocator.allocate("mir-902", 10).unwrap();
         assert_eq!(first.start, 41000);
         assert_eq!(second.start, 41016);
         assert!(!overlaps(first, second));
@@ -372,12 +374,12 @@ mod tests {
     }
 
     #[test]
-    fn is_idempotent_for_the_same_epic() {
+    fn is_idempotent_for_the_same_scope() {
         let (allocator, dir) = test_allocator("idempotent", 41100);
-        let first = allocator.allocate("demo-epic-a", 10).unwrap();
-        let again = allocator.allocate("demo-epic-a", 20).unwrap();
+        let first = allocator.allocate("mir-901", 10).unwrap();
+        let again = allocator.allocate("mir-901", 20).unwrap();
         assert_eq!(first, again);
-        assert_eq!(allocator.block("demo-epic-a").unwrap(), Some(first));
+        assert_eq!(allocator.block("mir-901").unwrap(), Some(first));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -387,7 +389,7 @@ mod tests {
         // Hold the first port of the first candidate block; the allocator must
         // skip the whole block, not just that port.
         let holder = TcpListener::bind((Ipv4Addr::LOCALHOST, 41200)).unwrap();
-        let block = allocator.allocate("demo-epic-a", 10).unwrap();
+        let block = allocator.allocate("mir-901", 10).unwrap();
         assert_eq!(block.start, 41216);
         drop(holder);
         let _ = fs::remove_dir_all(dir);
@@ -396,10 +398,10 @@ mod tests {
     #[test]
     fn release_returns_the_block_to_the_pool() {
         let (allocator, dir) = test_allocator("release", 41300);
-        let first = allocator.allocate("demo-epic-a", 10).unwrap();
-        assert_eq!(allocator.release("demo-epic-a").unwrap(), Some(first));
-        assert_eq!(allocator.release("demo-epic-a").unwrap(), None);
-        let reused = allocator.allocate("demo-epic-b", 10).unwrap();
+        let first = allocator.allocate("mir-901", 10).unwrap();
+        assert_eq!(allocator.release("mir-901").unwrap(), Some(first));
+        assert_eq!(allocator.release("mir-901").unwrap(), None);
+        let reused = allocator.allocate("mir-902", 10).unwrap();
         assert_eq!(reused, first);
         let _ = fs::remove_dir_all(dir);
     }
@@ -407,7 +409,7 @@ mod tests {
     #[test]
     fn release_idle_honours_the_window_and_dry_run() {
         let (allocator, dir) = test_allocator("idle", 41400);
-        let block = allocator.allocate("demo-epic-a", 1_000).unwrap();
+        let block = allocator.allocate("mir-901", 1_000).unwrap();
         assert!(allocator
             .release_idle(IDLE_SECS, 1_000, true)
             .unwrap()
@@ -415,14 +417,14 @@ mod tests {
         let stale = allocator
             .release_idle(IDLE_SECS, 1_000 + IDLE_SECS, true)
             .unwrap();
-        assert_eq!(stale, vec![("demo-epic-a".to_string(), block)]);
+        assert_eq!(stale, vec![("mir-901".to_string(), block)]);
         // A dry run changes nothing.
-        assert_eq!(allocator.block("demo-epic-a").unwrap(), Some(block));
+        assert_eq!(allocator.block("mir-901").unwrap(), Some(block));
         let released = allocator
             .release_idle(IDLE_SECS, 1_000 + IDLE_SECS + 1, false)
             .unwrap();
         assert_eq!(released.len(), 1);
-        assert_eq!(allocator.block("demo-epic-a").unwrap(), None);
+        assert_eq!(allocator.block("mir-901").unwrap(), None);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -430,20 +432,20 @@ mod tests {
     fn reports_exhaustion_instead_of_reusing_a_ported_block() {
         let dir = scratch("exhausted");
         let allocator = Allocator::with_range(dir.join("state.json"), 42000, 42016);
-        assert!(allocator.allocate("demo-epic-a", 1).is_ok());
-        let error = allocator.allocate("demo-epic-b", 1).unwrap_err();
+        assert!(allocator.allocate("mir-901", 1).is_ok());
+        let error = allocator.allocate("mir-902", 1).unwrap_err();
         assert!(matches!(error, PortError::Exhausted { .. }));
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn records_and_touches_an_epic() {
+    fn records_and_touches_a_scope() {
         let (allocator, dir) = test_allocator("record", 42100);
-        let block = allocator.allocate("demo-epic-a", 10).unwrap();
-        let meta = EpicMeta {
+        let block = allocator.allocate("mir-901", 10).unwrap();
+        let meta = ScopeMeta {
             project: "demo".to_string(),
-            epic: "epic-a".to_string(),
-            dir: PathBuf::from("/home/demo/epic-a"),
+            scope: "mir-901".to_string(),
+            dir: PathBuf::from("/home/demo/mir-901"),
             published: vec![PublishedPort {
                 role: "pg".to_string(),
                 port: block.start,
@@ -454,22 +456,19 @@ mod tests {
                 upstream: "db.example.com:5432".to_string(),
             }],
         };
-        allocator.record("demo-epic-a", &meta, 20).unwrap();
-        let entry = allocator.entry("demo-epic-a").unwrap().unwrap();
+        allocator.record("mir-901", &meta, 20).unwrap();
+        let entry = allocator.entry("mir-901").unwrap().unwrap();
         assert_eq!(entry.project.as_deref(), Some("demo"));
-        assert_eq!(entry.epic.as_deref(), Some("epic-a"));
+        assert_eq!(entry.scope.as_deref(), Some("mir-901"));
         assert_eq!(entry.published[0].port, block.start);
         assert_eq!(entry.last_used, 20);
 
-        assert!(allocator.touch("demo-epic-a", 30).unwrap());
-        assert_eq!(
-            allocator.entry("demo-epic-a").unwrap().unwrap().last_used,
-            30
-        );
-        assert!(!allocator.touch("demo-epic-b", 30).unwrap());
+        assert!(allocator.touch("mir-901", 30).unwrap());
+        assert_eq!(allocator.entry("mir-901").unwrap().unwrap().last_used, 30);
+        assert!(!allocator.touch("mir-902", 30).unwrap());
 
         assert!(matches!(
-            allocator.record("demo-epic-b", &meta, 30),
+            allocator.record("mir-902", &meta, 30),
             Err(PortError::Unknown(_))
         ));
         let _ = fs::remove_dir_all(dir);
@@ -478,26 +477,26 @@ mod tests {
     #[test]
     fn release_if_idle_rechecks_the_window() {
         let (allocator, dir) = test_allocator("release-if-idle", 42200);
-        let block = allocator.allocate("demo-epic-a", 1_000).unwrap();
+        let block = allocator.allocate("mir-901", 1_000).unwrap();
         // A concurrent `up` refreshed the entry: gc must keep it.
         assert_eq!(
             allocator
-                .release_if_idle("demo-epic-a", IDLE_SECS, 1_000 + IDLE_SECS)
+                .release_if_idle("mir-901", IDLE_SECS, 1_000 + IDLE_SECS)
                 .unwrap(),
             Some(block)
         );
-        let block = allocator.allocate("demo-epic-a", 1_000).unwrap();
-        let _ = allocator.touch("demo-epic-a", 2_000).unwrap();
+        let block = allocator.allocate("mir-901", 1_000).unwrap();
+        let _ = allocator.touch("mir-901", 2_000).unwrap();
         assert_eq!(
             allocator
-                .release_if_idle("demo-epic-a", IDLE_SECS, 1_000 + IDLE_SECS)
+                .release_if_idle("mir-901", IDLE_SECS, 1_000 + IDLE_SECS)
                 .unwrap(),
             None
         );
-        assert_eq!(allocator.block("demo-epic-a").unwrap(), Some(block));
+        assert_eq!(allocator.block("mir-901").unwrap(), Some(block));
         assert_eq!(
             allocator
-                .release_if_idle("demo-epic-a", IDLE_SECS, 2_000 + IDLE_SECS)
+                .release_if_idle("mir-901", IDLE_SECS, 2_000 + IDLE_SECS)
                 .unwrap(),
             Some(block)
         );

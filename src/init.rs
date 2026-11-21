@@ -1,9 +1,9 @@
 //! `msbx init` — set up the host, then prove the Docker driver against a
-//! synthetic two-epic project.
+//! synthetic two-scope project.
 //!
 //! `init` is idempotent: it installs the `msbx.test` resolver and the `msbx dns`
 //! unit, pulls a project through the real manifest reader and the port-block
-//! allocator, starts two epics that both run Postgres on 5432, and prints a
+//! allocator, starts two scopes that both run Postgres on 5432, and prints a
 //! `PASS` / `FAIL` / `SKIP` table with what it observed. Any `FAIL` exits 1, any
 //! `SKIP` exits 2, and both mean the run is not a pass.
 //!
@@ -24,7 +24,7 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 const PROJECT: &str = "demo";
-const EPICS: [&str; 2] = ["epic-a", "epic-b"];
+const SCOPES: [&str; 2] = ["mir-901", "mir-902"];
 const SECRET_NAME: &str = "API_TOKEN";
 const SECRET_VALUE: &str = "msbx-init-secret";
 const ENV_NAME: &str = "INIT_MARK";
@@ -160,14 +160,14 @@ impl Host {
     }
 }
 
-struct Epic {
+struct Scope {
     name: &'static str,
     dir: PathBuf,
     manifest: Manifest,
     block: Block,
 }
 
-impl Epic {
+impl Scope {
     fn project(&self) -> String {
         format!("{PROJECT}-{}", self.name)
     }
@@ -204,7 +204,7 @@ impl Epic {
 }
 
 /// The synthetic project every `init` run measures. It is a real manifest: the
-/// reader validates it, the allocator gives each epic a block, and the override
+/// reader validates it, the allocator gives each scope a block, and the override
 /// carries the names, aliases, env files and secret mount.
 const CHECK_MANIFEST: &str = r#"x-msbx:
   project: demo
@@ -273,8 +273,8 @@ pub fn run(args: &[String]) -> ExitCode {
         return finish(&checks, &[], &work, keep);
     }
 
-    let epics = match prepare(&work) {
-        Ok(epics) => epics,
+    let scopes = match prepare(&work) {
+        Ok(scopes) => scopes,
         Err(error) => {
             checks.push(Check::fail("C2", "ports", error));
             skip_rest(&mut checks, "the synthetic project could not be written");
@@ -283,13 +283,13 @@ pub fn run(args: &[String]) -> ExitCode {
         }
     };
 
-    let started = start(&epics);
-    checks.push(check_ports(&epics, &started));
+    let started = start(&scopes);
+    checks.push(check_ports(&scopes, &started));
     if !started.all_ok() {
         for (id, title) in [
             ("C3", "host reachability"),
             ("C4", "names"),
-            ("C5", "in-epic"),
+            ("C5", "in-scope"),
             ("C6", "isolation"),
             ("C7", "env"),
         ] {
@@ -300,17 +300,17 @@ pub fn run(args: &[String]) -> ExitCode {
             ));
         }
         drop(dns_guard);
-        return finish(&checks, &epics, &work, keep);
+        return finish(&checks, &scopes, &work, keep);
     }
 
-    checks.push(check_reachability(&epics));
-    checks.push(check_names(&epics));
-    checks.push(check_in_epic(&epics));
-    checks.push(check_isolation(&epics));
-    checks.push(check_env(&epics, &work));
+    checks.push(check_reachability(&scopes));
+    checks.push(check_names(&scopes));
+    checks.push(check_in_scope(&scopes));
+    checks.push(check_isolation(&scopes));
+    checks.push(check_env(&scopes, &work));
 
     drop(dns_guard);
-    finish(&checks, &epics, &work, keep)
+    finish(&checks, &scopes, &work, keep)
 }
 
 fn reset_work(work: &Path) -> std::io::Result<()> {
@@ -321,7 +321,7 @@ fn reset_work(work: &Path) -> std::io::Result<()> {
     state::create_private_dir(&work.join("secrets"))
 }
 
-fn prepare(work: &Path) -> Result<Vec<Epic>, String> {
+fn prepare(work: &Path) -> Result<Vec<Scope>, String> {
     state::write_private(
         &work.join("env").join("pg.env"),
         "POSTGRES_PASSWORD=msbx-init\n",
@@ -341,8 +341,8 @@ fn prepare(work: &Path) -> Result<Vec<Epic>, String> {
         CHECK_PORT_RANGE.1,
     );
     let at = state::now();
-    let mut epics = Vec::with_capacity(EPICS.len());
-    for name in EPICS {
+    let mut scopes = Vec::with_capacity(SCOPES.len());
+    for name in SCOPES {
         let dir = work.join("project").join(name);
         let manifest_dir = dir.join(".multica");
         state::create_private_dir(&manifest_dir)
@@ -355,24 +355,24 @@ fn prepare(work: &Path) -> Result<Vec<Epic>, String> {
         let block = allocator
             .allocate(&format!("{PROJECT}-{name}"), at)
             .map_err(|error| format!("cannot allocate a port block: {error}"))?;
-        let epic = Epic {
+        let scope = Scope {
             name,
             dir,
             manifest,
             block,
         };
-        write_override(&epic, work)
+        write_override(&scope, work)
             .map_err(|error| format!("cannot write the override for {name}: {error}"))?;
-        epics.push(epic);
+        scopes.push(scope);
     }
-    Ok(epics)
+    Ok(scopes)
 }
 
-fn write_override(epic: &Epic, work: &Path) -> std::io::Result<()> {
-    let pg_port = epic
+fn write_override(scope: &Scope, work: &Path) -> std::io::Result<()> {
+    let pg_port = scope
         .manifest
-        .host_port(epic.block, "pg")
-        .unwrap_or(epic.block.start);
+        .host_port(scope.block, "pg")
+        .unwrap_or(scope.block.start);
     let pg_env = yaml_path(&work.join("env").join("pg.env"));
     let probe_env = yaml_path(&work.join("env").join("probe.env"));
     let secret = work
@@ -381,7 +381,7 @@ fn write_override(epic: &Epic, work: &Path) -> std::io::Result<()> {
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
-    let override_path = epic.dir.join(".multica").join("override.yaml");
+    let override_path = scope.dir.join(".multica").join("override.yaml");
     let body = format!(
         r#"services:
   pg:
@@ -413,11 +413,11 @@ networks:
   default:
     name: {network}
 "#,
-        pg_container = epic.container("pg"),
-        client = epic.container("client"),
-        probe = epic.container("probe"),
-        alias = epic.alias("pg"),
-        network = epic.project(),
+        pg_container = scope.container("pg"),
+        client = scope.container("client"),
+        probe = scope.container("probe"),
+        alias = scope.alias("pg"),
+        network = scope.project(),
         secret_name = SECRET_NAME,
     );
     std::fs::write(override_path, body)
@@ -443,10 +443,10 @@ impl Start {
     }
 }
 
-fn start(epics: &[Epic]) -> Start {
+fn start(scopes: &[Scope]) -> Start {
     let mut start = Start::default();
-    for epic in epics {
-        let up = epic.compose(&[
+    for scope in scopes {
+        let up = scope.compose(&[
             "up".to_string(),
             "-d".to_string(),
             "--wait".to_string(),
@@ -456,24 +456,24 @@ fn start(epics: &[Epic]) -> Start {
         if !up.ok {
             start
                 .errors
-                .push(format!("{}: {}", epic.name, one_line(&up.text())));
+                .push(format!("{}: {}", scope.name, one_line(&up.text())));
         }
     }
     start
 }
 
-fn check_ports(epics: &[Epic], started: &Start) -> Check {
+fn check_ports(scopes: &[Scope], started: &Start) -> Check {
     if !started.all_ok() {
         return Check::fail("C2", "ports", started.errors.join(" ; "));
     }
-    if epics.len() != 2 {
-        return Check::fail("C2", "ports", "expected two synthetic epics");
+    if scopes.len() != 2 {
+        return Check::fail("C2", "ports", "expected two synthetic scopes");
     }
 
     let mut parts = Vec::new();
     let mut observed = Vec::new();
-    for epic in epics {
-        let container = epic.container("pg");
+    for scope in scopes {
+        let container = scope.container("pg");
         let out = driver::run("docker", &["port", &container, "5432/tcp"]);
         let port = out
             .stdout
@@ -484,7 +484,7 @@ fn check_ports(epics: &[Epic], started: &Start) -> Check {
         match port {
             Some(port) => {
                 observed.push(port);
-                parts.push(format!("{} 127.0.0.1:{port}→5432", epic.name));
+                parts.push(format!("{} 127.0.0.1:{port}→5432", scope.name));
             }
             None => {
                 return Check::fail(
@@ -499,9 +499,9 @@ fn check_ports(epics: &[Epic], started: &Start) -> Check {
         }
     }
 
-    let expected: Vec<u16> = epics
+    let expected: Vec<u16> = scopes
         .iter()
-        .filter_map(|epic| epic.manifest.host_port(epic.block, "pg"))
+        .filter_map(|scope| scope.manifest.host_port(scope.block, "pg"))
         .collect();
     let distinct = observed[0] != observed[1];
     if observed == expected && distinct {
@@ -519,11 +519,11 @@ fn check_ports(epics: &[Epic], started: &Start) -> Check {
     }
 }
 
-fn check_reachability(epics: &[Epic]) -> Check {
+fn check_reachability(scopes: &[Scope]) -> Check {
     let mut parts = Vec::new();
     let mut reachable = 0;
-    for epic in epics {
-        let Some(port) = epic.manifest.host_port(epic.block, "pg") else {
+    for scope in scopes {
+        let Some(port) = scope.manifest.host_port(scope.block, "pg") else {
             continue;
         };
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
@@ -534,19 +534,19 @@ fn check_reachability(epics: &[Epic]) -> Check {
             parts.push(format!("127.0.0.1:{port} closed"));
         }
     }
-    if reachable == epics.len() {
+    if reachable == scopes.len() {
         Check::pass("C3", "host reachability", parts.join(", "))
     } else {
         Check::fail("C3", "host reachability", parts.join(", "))
     }
 }
 
-fn check_names(epics: &[Epic]) -> Check {
+fn check_names(scopes: &[Scope]) -> Check {
     let address: SocketAddr = platform::DNS_ADDR.parse().expect("static resolver address");
     let mut parts = Vec::new();
     let mut ok = true;
-    for epic in epics {
-        let name = epic.alias("pg");
+    for scope in scopes {
+        let name = scope.alias("pg");
         match dns::query(address, &name, 1) {
             Ok(answer) if answer.records == [Ipv4Addr::LOCALHOST] => {
                 parts.push(format!("{name} → 127.0.0.1"));
@@ -586,13 +586,13 @@ fn check_names(epics: &[Epic]) -> Check {
     }
 }
 
-fn check_in_epic(epics: &[Epic]) -> Check {
-    let epic = &epics[0];
-    let service = epic.alias("pg");
+fn check_in_scope(scopes: &[Scope]) -> Check {
+    let scope = &scopes[0];
+    let service = scope.alias("pg");
     let script = format!(
         "getent hosts pg >/dev/null && getent hosts {service} >/dev/null && nc -z -w 2 pg 5432 && nc -z -w 2 {service} 5432 && echo OK"
     );
-    let out = epic.compose(&[
+    let out = scope.compose(&[
         "exec".to_string(),
         "-T".to_string(),
         "client".to_string(),
@@ -603,25 +603,25 @@ fn check_in_epic(epics: &[Epic]) -> Check {
     if out.ok && out.stdout.contains("OK") {
         Check::pass(
             "C5",
-            "in-epic",
-            format!("{} reaches pg and {service} on 5432", epic.name),
+            "in-scope",
+            format!("{} reaches pg and {service} on 5432", scope.name),
         )
     } else {
         Check::fail(
             "C5",
-            "in-epic",
+            "in-scope",
             format!(
                 "{} could not reach pg by service name and alias: {}",
-                epic.name,
+                scope.name,
                 one_line(&out.text())
             ),
         )
     }
 }
 
-fn check_isolation(epics: &[Epic]) -> Check {
-    let first = &epics[0];
-    let second = &epics[1];
+fn check_isolation(scopes: &[Scope]) -> Check {
+    let first = &scopes[0];
+    let second = &scopes[1];
     let out = driver::run(
         "docker",
         &[
@@ -687,10 +687,10 @@ fn check_isolation(epics: &[Epic]) -> Check {
     }
 }
 
-fn check_env(epics: &[Epic], work: &Path) -> Check {
-    let epic = &epics[0];
+fn check_env(scopes: &[Scope], work: &Path) -> Check {
+    let scope = &scopes[0];
     let script = format!("printf '%s|' \"${ENV_NAME}\"; cat /run/msbx/secrets/{SECRET_NAME}");
-    let out = epic.compose(&[
+    let out = scope.compose(&[
         "exec".to_string(),
         "-T".to_string(),
         "probe".to_string(),
@@ -749,7 +749,7 @@ fn skip_rest(checks: &mut Vec<Check>, why: &str) {
         ("C2", "ports"),
         ("C3", "host reachability"),
         ("C4", "names"),
-        ("C5", "in-epic"),
+        ("C5", "in-scope"),
         ("C6", "isolation"),
         ("C7", "env"),
     ] {
@@ -757,10 +757,10 @@ fn skip_rest(checks: &mut Vec<Check>, why: &str) {
     }
 }
 
-fn finish(checks: &[Check], epics: &[Epic], work: &Path, keep: bool) -> ExitCode {
+fn finish(checks: &[Check], scopes: &[Scope], work: &Path, keep: bool) -> ExitCode {
     if !keep {
-        for epic in epics {
-            let down = epic.compose(&[
+        for scope in scopes {
+            let down = scope.compose(&[
                 "down".to_string(),
                 "-v".to_string(),
                 "--remove-orphans".to_string(),
@@ -768,7 +768,7 @@ fn finish(checks: &[Check], epics: &[Epic], work: &Path, keep: bool) -> ExitCode
             if !down.ok {
                 eprintln!(
                     "msbx init: could not remove {}: {}",
-                    epic.project(),
+                    scope.project(),
                     one_line(&down.text())
                 );
             }
@@ -777,8 +777,8 @@ fn finish(checks: &[Check], epics: &[Epic], work: &Path, keep: bool) -> ExitCode
 
     if keep {
         println!("keeping the check project under {}", work.display());
-        for epic in epics {
-            println!("  {} ({} project)", epic.project(), epic.dir.display());
+        for scope in scopes {
+            println!("  {} ({} project)", scope.project(), scope.dir.display());
         }
     } else {
         let _ = std::fs::remove_dir_all(work);

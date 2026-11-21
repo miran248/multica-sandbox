@@ -1,8 +1,8 @@
-# Remote services: in-epic tunnels
+# Remote services: in-scope tunnels
 
 Status: delivered by [MIR-262](https://multica.ai/miran248/issues/MIR-262),
 stage 6 of [MIR-178](https://multica.ai/miran248/issues/MIR-178). A remote
-service is a tunnel sidecar inside the epic's network, addressed exactly like a
+service is a tunnel sidecar inside the scope's network, addressed exactly like a
 local role: one role name, one container port, the same dotted alias, no host
 port forwarding.
 
@@ -32,17 +32,17 @@ services:
 - A tunnelled role is **not** a `services` entry: `x-msbx.tunnels.<role>` and a
   service `<role>` in the same file is an error. `msbx` generates the sidecar.
 - `port` is both the remote service port and the port the sidecar listens on
-  inside the epic, so `pg:5432` works the same whether `pg` is local or remote.
+  inside the scope, so `pg:5432` works the same whether `pg` is local or remote.
 - `x-msbx.tunnels` is the only place a remote service is declared. `publish` may
   list the role (nothing forces it): it then gets a loopback port from the
-  epic's block like any other published role, and `publish.<role>` must equal
+  scope's block like any other published role, and `publish.<role>` must equal
   the tunnel port. Without `publish` the role has **no host port** at all.
 
-`msbx up` generates, on the epic's network:
+`msbx up` generates, on the scope's network:
 
 ```
-<project>-<epic>-<role>                       signals-mir-42-pg
-<role>.<epic>.<project>.msbx.test             pg.mir-42.signals.msbx.test
+<project>-<scope>-<role>                       signals-mir-42-pg
+<role>.<scope>.<project>.msbx.test             pg.mir-42.signals.msbx.test
 ```
 
 The sidecar carries the role's dotted network alias and the `com.msbx.*` labels

@@ -1,11 +1,11 @@
-//! The epic namespace: keys, names, paths, published ports, tunnel sidecars and
+//! The scope namespace: keys, names, paths, published ports, tunnel sidecars and
 //! the generated Compose override.
 //!
 //! Everything here is pure: the same [`Manifest`], [`Block`] and [`Envelope`]
 //! produce the same override text, so a second `up` regenerates an identical
 //! file and Compose changes nothing. The override is the only place container
 //! names, dotted aliases, loopback port mappings, env files, secret mounts,
-//! tunnel sidecars and the epic's network name are decided.
+//! tunnel sidecars and the scope's network name are decided.
 
 use crate::dns;
 use crate::env::{Envelope, SECRET_MOUNT};
@@ -15,47 +15,47 @@ use crate::state::{self, PublishedPort, TunnelRecord};
 use std::fmt;
 use std::path::PathBuf;
 
-/// The generated Compose file, under the epic's state directory.
+/// The generated Compose file, under the scope's state directory.
 pub const OVERRIDE_FILE: &str = "override.yaml";
 
-/// One epic: the project key and the epic key. Together they name the Compose
+/// One scope: the project key and the scope key. Together they name the Compose
 /// project, every container and every dotted alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     project: String,
-    epic: String,
+    scope: String,
 }
 
 /// A refused key or an impossible override.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EpicError(String);
+pub struct ScopeError(String);
 
-impl EpicError {
+impl ScopeError {
     fn new(message: impl Into<String>) -> Self {
-        EpicError(message.into())
+        ScopeError(message.into())
     }
 }
 
-impl fmt::Display for EpicError {
+impl fmt::Display for ScopeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::error::Error for EpicError {}
+impl std::error::Error for ScopeError {}
 
 impl Key {
     /// Validate the two keys. The project comes from `x-msbx.project` (already
-    /// validated there); the epic is lowercased, so `MIR-178` is `mir-178`.
-    pub fn new(project: &str, epic: &str) -> Result<Key, EpicError> {
-        if !valid_key(project) {
-            return Err(EpicError::new(format!(
+    /// validated there); the scope is lowercased, so `MIR-178` is `mir-178`.
+    pub fn new(project: &str, scope: &str) -> Result<Key, ScopeError> {
+        if !valid_project(project) {
+            return Err(ScopeError::new(format!(
                 "project `{project}` must match [a-z0-9-]+"
             )));
         }
         Ok(Key {
             project: project.to_string(),
-            epic: normalize_epic(epic)?,
+            scope: normalize_scope(scope)?,
         })
     }
 
@@ -63,34 +63,34 @@ impl Key {
         &self.project
     }
 
-    pub fn epic(&self) -> &str {
-        &self.epic
+    pub fn scope(&self) -> &str {
+        &self.scope
     }
 
-    /// The Compose project, `<project>-<epic>`.
+    /// The Compose project, `<project>-<scope>`.
     pub fn compose_project(&self) -> String {
-        format!("{}-{}", self.project, self.epic)
+        format!("{}-{}", self.project, self.scope)
     }
 
-    /// The epic's network, named after its Compose project so two epics never
+    /// The scope's network, named after its Compose project so two scopes never
     /// share one.
     pub fn network(&self) -> String {
         self.compose_project()
     }
 
-    /// The container name, `<project>-<epic>-<role>`.
+    /// The container name, `<project>-<scope>-<role>`.
     pub fn container(&self, role: &str) -> String {
-        format!("{}-{}-{role}", self.project, self.epic)
+        format!("{}-{}-{role}", self.project, self.scope)
     }
 
-    /// The dotted alias, `<role>.<epic>.<project>.msbx.test`.
+    /// The dotted alias, `<role>.<scope>.<project>.msbx.test`.
     pub fn alias(&self, role: &str) -> String {
-        format!("{role}.{}.{}.{}", self.epic, self.project, dns::ZONE)
+        format!("{role}.{}.{}.{}", self.scope, self.project, dns::ZONE)
     }
 
-    /// The epic's envelope directory, outside every checkout.
+    /// The scope's envelope directory, outside every checkout.
     pub fn dir(&self) -> PathBuf {
-        state::epic_dir(&self.project, &self.epic)
+        state::scope_dir(&self.project, &self.scope)
     }
 
     /// The generated override, under [`Key::dir`].
@@ -99,20 +99,31 @@ impl Key {
     }
 }
 
-/// Lowercase and validate an epic key.
-pub fn normalize_epic(raw: &str) -> Result<String, EpicError> {
-    let epic = raw.trim().to_ascii_lowercase();
-    if !valid_key(&epic) {
-        return Err(EpicError::new(format!(
-            "epic `{raw}` must match [a-z0-9-]+"
+/// Lowercase and validate a scope key.
+pub fn normalize_scope(raw: &str) -> Result<String, ScopeError> {
+    let scope = raw.trim().to_ascii_lowercase();
+    if !valid_scope(&scope) {
+        return Err(ScopeError::new(format!(
+            "scope `{raw}` must match [a-z0-9][a-z0-9-]{{0,47}}"
         )));
     }
-    Ok(epic)
+    Ok(scope)
 }
 
-/// A key becomes a Compose project, a container prefix and DNS labels, so it
-/// stays lowercase alphanumerics and hyphens.
-fn valid_key(value: &str) -> bool {
+/// A scope is a ticket (`mir-42`) or a chat session (`chat-1a2b3c4d`). It
+/// becomes a Compose project, a container prefix and DNS labels, so it stays
+/// lowercase alphanumerics and hyphens, starts with one and is at most 48 bytes.
+fn valid_scope(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_lowercase() || first.is_ascii_digit())
+        && value.len() <= 48
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !value.ends_with('-')
+}
+
+/// A project key becomes a Compose project and a store directory name; it is
+/// longer-lived than a scope, so it keeps the manifest's looser rule.
+fn valid_project(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 63
         && value
@@ -123,7 +134,7 @@ fn valid_key(value: &str) -> bool {
 }
 
 /// One role reachable from the host: its container port and the loopback port
-/// the epic's block assigns it.
+/// the scope's block assigns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Published {
     pub role: String,
@@ -132,7 +143,7 @@ pub struct Published {
 }
 
 /// Map `x-msbx.publish` onto `block`, in declaration order.
-pub fn published(manifest: &Manifest, block: Block) -> Result<Vec<Published>, EpicError> {
+pub fn published(manifest: &Manifest, block: Block) -> Result<Vec<Published>, ScopeError> {
     check_publish(manifest)?;
     Ok(manifest
         .publish
@@ -149,9 +160,9 @@ pub fn published(manifest: &Manifest, block: Block) -> Result<Vec<Published>, Ep
 }
 
 /// `x-msbx.publish` must fit the block before a block is allocated for it.
-pub fn check_publish(manifest: &Manifest) -> Result<(), EpicError> {
+pub fn check_publish(manifest: &Manifest) -> Result<(), ScopeError> {
     if manifest.publish.len() > usize::from(BLOCK_SIZE) {
-        return Err(EpicError::new(format!(
+        return Err(ScopeError::new(format!(
             "`x-msbx.publish` lists {} roles but a block holds {BLOCK_SIZE}",
             manifest.publish.len()
         )));
@@ -166,7 +177,7 @@ pub fn check_publish(manifest: &Manifest) -> Result<(), EpicError> {
 /// rendered `env_file` and each secret mounted read-only at
 /// `/run/msbx/secrets/<NAME>` with `<NAME>_FILE` in its environment. A
 /// `x-msbx.tunnels` role gets a generated sidecar instead of a Compose service:
-/// it listens on the role's port inside the epic, carries the same alias and
+/// it listens on the role's port inside the scope, carries the same alias and
 /// labels, and is never given a host port unless `publish` lists it. The
 /// default network is named after the Compose project.
 pub fn override_yaml(
@@ -244,7 +255,7 @@ fn push_env_and_secrets(out: &mut String, envelope: &Envelope, role: &str) {
 fn push_labels(out: &mut String, key: &Key, role: &str, tunnel: Option<&Tunnel>) {
     out.push_str("    labels:\n");
     out.push_str(&format!("      com.msbx.project: {}\n", key.project()));
-    out.push_str(&format!("      com.msbx.epic: {}\n", key.epic()));
+    out.push_str(&format!("      com.msbx.scope: {}\n", key.scope()));
     out.push_str(&format!("      com.msbx.role: {role}\n"));
     if let Some(tunnel) = tunnel {
         out.push_str(&format!("      com.msbx.tunnel: {}\n", tunnel.via.as_str()));
@@ -407,13 +418,13 @@ services:
     }
 
     #[test]
-    fn names_are_project_epic_role_in_both_directions() {
+    fn names_are_project_scope_role_in_both_directions() {
         let key = key();
-        assert_eq!(key.epic(), "mir-42");
+        assert_eq!(key.scope(), "mir-42");
         assert_eq!(key.compose_project(), "signals-mir-42");
         assert_eq!(key.container("pg"), "signals-mir-42-pg");
         assert_eq!(key.alias("pg"), "pg.mir-42.signals.msbx.test");
-        assert_eq!(key.dir(), state::epic_dir("signals", "mir-42"));
+        assert_eq!(key.dir(), state::scope_dir("signals", "mir-42"));
     }
 
     #[test]
@@ -421,7 +432,7 @@ services:
         assert!(Key::new("Signals", "mir-1").is_err());
         assert!(Key::new("signals", "mir 1").is_err());
         assert!(Key::new("signals", "-mir").is_err());
-        assert_eq!(normalize_epic(" MIR-178 ").unwrap(), "mir-178");
+        assert_eq!(normalize_scope(" MIR-178 ").unwrap(), "mir-178");
     }
 
     #[test]
@@ -534,7 +545,7 @@ services:
         let key = key();
         assert_eq!(
             key.override_path(),
-            state::epic_dir("signals", "mir-42").join(OVERRIDE_FILE)
+            state::scope_dir("signals", "mir-42").join(OVERRIDE_FILE)
         );
     }
 

@@ -1,4 +1,4 @@
-//! `msbx` — one sandbox namespace per epic.
+//! `msbx` — one sandbox namespace per scope.
 
 #![forbid(unsafe_code)]
 
@@ -6,32 +6,36 @@ use multica_sandbox::{dns, doctor, init, lifecycle};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-msbx — one sandbox namespace per epic
+msbx — one sandbox namespace per scope
 
 Usage:
-  msbx up [--epic E] [--project P] [--file F]   Start or reconcile the epic box
-  msbx down [--epic E] [--project P]            Stop the box, keep its volumes
-  msbx rm [--epic E] [--project P] [--yes]      Destroy the box and its volumes
-  msbx status [--epic E] [--project P] [--json] Show boxes, health and ports
-  msbx gc [--dry-run]                           Remove boxes idle for 14 days
-  msbx env ls|export [--epic E] [--project P]   List the harness names, or export them
-  msbx doctor                                   Diagnose the Docker host; changes nothing
-  msbx init [--check] [--keep]                  Set up the host, then run the driver checks
-  msbx dns [--listen ADDR]                      Serve the msbx.test resolver
+  msbx up [--scope S] [--project P] [--file F]   Start or reconcile the scope box
+  msbx down [--scope S] [--project P]            Stop the box, keep its volumes
+  msbx rm [--scope S] [--project P] [--yes]      Destroy the box and its volumes
+  msbx status [--scope S] [--project P] [--json] Show boxes, health and ports
+  msbx gc [--dry-run]                            Final-state and idle sweep
+  msbx env ls|export [--scope S] [--project P]   Names, or the host-context exports
+  msbx doctor                                    Diagnose the Docker host; changes nothing
+  msbx init [--check] [--keep]                   Set up the host, then run the driver checks
+  msbx dns [--listen ADDR]                       Serve the msbx.test resolver
   msbx --version
   msbx --help
 
-`up` reads `.multica/compose.yaml` (or `--file`), resolves the project's env and
-secret names from `$XDG_CONFIG_HOME/msbx/projects/<project>/`, gives the epic its
-port block, writes the generated envelope and override outside the checkout and
-starts the Compose project. The epic is `--epic` or `MSBX_EPIC`; the wrapper
-supplies it for a task.
+`up` reads `.multica/compose.yaml` (or `--file`), refuses a checkout bind and a
+service `build:` inside the checkout, resolves the manifest's names from the
+host, project and harness stores, gives the scope its port block, writes the
+generated envelope and override outside the checkout and starts the Compose
+project. The scope is `--scope`, `MSBX_SCOPE`, the daemon task context or the
+worktree branch; `--epic` and `MSBX_EPIC` are retired and name the replacement.
 
-`env ls` prints the harness envelope's names without values; `env export` prints
-shell-safe exports for the harness. Both read what the last `up` rendered.
+`env ls` prints the harness envelope's names without values; `env export`
+prints `env/host.env`, the host context with the assigned loopback ports. Both
+read what the last `up` rendered. A final ticket box (done, cancelled, archived
+or gone) and an idle chat or ticket box are removed by `gc`, which `--dry-run`
+only lists.
 
 `init` installs the msbx.test resolver and the msbx dns unit (or prints the one
-privileged command it needs), then runs C1-C7 against a synthetic two-epic
+privileged command it needs), then runs C1-C7 against a synthetic two-scope
 project. `--check` installs nothing. `--keep` keeps the containers it created.
 
 Exit codes for init: 0 all checks passed, 1 a check failed, 2 one or more checks
