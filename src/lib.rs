@@ -3,8 +3,8 @@
 //! This crate is the engine of the per-epic sandbox: the Compose lifecycle, the
 //! epic namespace and its generated override, the manifest reader, the project
 //! value store and the epic envelope renderer, the loopback port-block allocator
-//! and the `msbx.test` resolver. The `msbx` binary is the command surface;
-//! tunnels are a later stage.
+//! and the `msbx.test` resolver. The `msbx` binary is the command surface and
+//! `msbx-run` is the harness wrapper; tunnels are a later stage.
 
 #![forbid(unsafe_code)]
 
@@ -20,3 +20,4 @@ pub mod platform;
 pub mod ports;
 pub mod state;
 pub mod store;
+pub mod wrapper;

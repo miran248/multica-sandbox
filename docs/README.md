@@ -9,3 +9,5 @@
 - Contract: [specs/0001-per-epic-sandbox.md](specs/0001-per-epic-sandbox.md).
 - Env and secrets: [env.md](env.md) — the store, the render pipeline, the
   harness envelope and its stated limits.
+- Harness wrapper: [wrapper.md](wrapper.md) — `msbx-run`, epic resolution from
+  the task branch, probe pass-through, profile wiring and rollback.

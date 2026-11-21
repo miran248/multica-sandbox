@@ -309,6 +309,76 @@ pub fn export_line(name: &str, value: &str) -> String {
     format!("export {name}='{}'", value.replace('\'', "'\\''"))
 }
 
+/// Read back [`export_line`] output: the wrapper consumes `msbx env export`
+/// without handing the values to a shell.
+pub fn parse_exports(text: &str) -> Result<Vec<(String, String)>, EnvError> {
+    let mut seen = BTreeSet::new();
+    let mut exports = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (name, value) = parse_export_line(line).map_err(|error| {
+            EnvError::new(format!("`msbx env export` line {}: {error}", index + 1))
+        })?;
+        if !seen.insert(name.clone()) {
+            return Err(EnvError::new(format!(
+                "`msbx env export` exports `{name}` twice"
+            )));
+        }
+        exports.push((name, value));
+    }
+    Ok(exports)
+}
+
+fn parse_export_line(line: &str) -> Result<(String, String), String> {
+    let rest = line
+        .strip_prefix("export ")
+        .ok_or_else(|| "not an `export NAME='value'` line".to_string())?;
+    let (name, quoted) = rest
+        .split_once('=')
+        .ok_or_else(|| "not an `export NAME='value'` line".to_string())?;
+    if !crate::store::valid_name(name) {
+        return Err(format!("`{name}` is not a valid env name"));
+    }
+    let quoted = quoted
+        .strip_prefix('\'')
+        .ok_or_else(|| format!("`{name}` is not single-quoted"))?;
+
+    let bytes = quoted.as_bytes();
+    let mut value = String::new();
+    let mut index = 0;
+    loop {
+        match bytes.get(index) {
+            None => return Err(format!("`{name}` has no closing quote")),
+            Some(b'\'') => {
+                if index + 1 == bytes.len() {
+                    break;
+                }
+                // [`export_line`] writes a quote inside the value as `'\''`.
+                if bytes.get(index + 1) == Some(&b'\\')
+                    && bytes.get(index + 2) == Some(&b'\'')
+                    && bytes.get(index + 3) == Some(&b'\'')
+                {
+                    value.push('\'');
+                    index += 4;
+                    continue;
+                }
+                return Err(format!("`{name}` has text after its closing quote"));
+            }
+            Some(_) => {
+                let character = quoted[index..]
+                    .chars()
+                    .next()
+                    .expect("a byte index always starts a char");
+                value.push(character);
+                index += character.len_utf8();
+            }
+        }
+    }
+    Ok((name.to_string(), value))
+}
+
 fn insert_harness(
     harness: &mut BTreeMap<String, String>,
     name: String,
@@ -650,6 +720,42 @@ services:
         assert_eq!(export_line("A", "plain"), "export A='plain'");
         assert_eq!(export_line("A", "it's"), r#"export A='it'\''s'"#);
         assert_eq!(export_line("A", "$HOME `x`"), "export A='$HOME `x`'");
+    }
+
+    #[test]
+    fn exported_lines_round_trip_through_the_parser() {
+        let values = [
+            ("PLAIN", "plain"),
+            ("QUOTED", "it's"),
+            ("SHELL", "$HOME `x` \"y\" \\"),
+            ("EMPTY", ""),
+            ("URL", "postgres://pg.mir-42.signals.msbx.test:23000/mir-42"),
+            ("UNICODE", "héllo"),
+            ("EQUALS", "a=b=c"),
+        ];
+        let text = values
+            .iter()
+            .map(|(name, value)| export_line(name, value))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed = parse_exports(&text).unwrap();
+        assert_eq!(
+            parsed,
+            values
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn export_parsing_refuses_what_export_line_cannot_write() {
+        assert!(parse_exports("PLAIN=1\n").is_err());
+        assert!(parse_exports("export BAD NAME='1'\n").is_err());
+        assert!(parse_exports("export A=plain\n").is_err());
+        assert!(parse_exports("export A='open\n").is_err());
+        assert!(parse_exports("export A='x'y'\n").is_err());
+        assert!(parse_exports("export A='1'\nexport A='2'\n").is_err());
     }
 
     #[test]
