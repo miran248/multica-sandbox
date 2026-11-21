@@ -18,14 +18,16 @@ is written into the env (`MSBX_<ROLE>_PORT`), never hard-coded on the host.
 
 ## Status
 
-**Stage 3 delivered.** On top of the Docker foundation (`doctor`, `init`, the
+**Stage 5 delivered.** On top of the Docker foundation (`doctor`, `init`, the
 `msbx dns` resolver and its macOS/Linux installation, the `x-msbx` manifest
 reader and the per-epic port-block allocator) the Compose lifecycle is in
 place: `up`, `down`, `rm`, `status` and `gc` drive one Compose project per epic,
 and the generated override decides container names, dotted network aliases and
-loopback port mappings. Two epics run the same Postgres stack at once. The env
-store and tunnels land in the following stages of
-[MIR-178](https://multica.ai/miran248/issues/MIR-178).
+loopback port mappings. The env store renders per-role and harness envelopes
+outside the checkout, and `msbx-run` wraps the agent launch so a task starts its
+epic's box and the harness sees the exported values. Two epics run the same
+Postgres stack at once. Tunnels and the release into `main` are the remaining
+stages of [MIR-178](https://multica.ai/miran248/issues/MIR-178).
 
 ## Host setup
 
@@ -102,6 +104,18 @@ assigned ports (`--json` for scripts). `gc --dry-run` lists boxes idle for 14
 days without changing anything; `gc` stops them, removes their volumes and
 releases their blocks.
 
+## Agent launch
+
+The Multica runtime profile launches `msbx-run` instead of the harness. In a
+checkout with `.multica/compose.yaml` it resolves the epic (`MSBX_EPIC`, else the
+task's checkout branch or the daemon task context → the issue → its parent epic,
+cached per task), runs `msbx up`, exports the rendered envelope into the harness
+process, and execs the real harness with the original arguments and stdin. Any
+other checkout is passed through untouched, and `--probe` / `--list-models`
+launches never start a box. A failed sandbox step fails the launch;
+`MSBX_RUN_SOFT=1` prints the failure and passes the prompt through. The profile
+change and the rollback step are in [docs/wrapper.md](docs/wrapper.md).
+
 ## Commands
 
 ```sh
@@ -113,6 +127,7 @@ msbx gc [--dry-run]                           # remove boxes idle for 14 days
 msbx doctor                                   # describe the Docker host
 msbx init [--check] [--keep]                  # install the resolver, run C1-C7
 msbx dns [--listen ADDR]                      # the msbx.test resolver (127.0.0.1:5335)
+msbx-run [harness args...]                    # the profile's wrapper: up, export, exec
 ```
 
 ## The contract
@@ -123,17 +138,17 @@ msbx dns [--listen ADDR]                      # the msbx.test resolver (127.0.0.
 - **Names, not fixed ports** — `<role>.<epic>.<project>.msbx.test` is both the
   host name and the in-network alias; each published role gets a stable loopback
   port from the epic's block and the dotted name resolves to `127.0.0.1`.
-- **Env and secrets by name** (next stage) — the project's
-  `.multica/compose.yaml` `x-msbx` block lists names; the store will hold values
-  outside every checkout, and `msbx` will render per-role env files and mount
-  `/run/msbx/secrets/<name>` (0600).
+- **Env and secrets by name** — the project's `.multica/compose.yaml` `x-msbx`
+  block lists names; the store holds values outside every checkout, and `msbx`
+  renders per-role env files and mounts `/run/msbx/secrets/<name>` (0600).
+  `msbx-run` exports the harness envelope into the agent's process.
 - **Portable definitions** — the engine is here; each project repository owns
   its own manifest and volumes.
 
 ## Build
 
 ```sh
-cargo build
+cargo build          # builds msbx and msbx-run
 cargo test
 cargo run -- doctor
 cargo run -- init
@@ -141,7 +156,8 @@ cargo run -- init
 
 `msbx init` is idempotent and needs Docker running; the resolver install is the
 one `sudo` prompt. `--check` installs nothing while still running the C1–C7
-container checks, and `--keep` leaves those containers in place for
-inspection. A lifecycle run needs the `msbx dns` unit installed (or a `msbx dns`
-started for the session) for the dotted names to resolve on the host; the port
-mapping itself works without it.
+container checks, and `--keep` leaves those containers in place for inspection.
+A lifecycle run needs the `msbx dns` unit installed (or a `msbx dns` started for
+the session) for the dotted names to resolve on the host; the port mapping
+itself works without it. Install both binaries with `cargo install --path .`
+before pointing a runtime profile at `msbx-run`.
