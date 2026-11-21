@@ -3,8 +3,8 @@
 Status: delivered by [MIR-273](https://multica.ai/miran248/issues/MIR-273),
 stage 3 of [MIR-270](https://multica.ai/miran248/issues/MIR-270). The wrapper
 from [MIR-261](https://multica.ai/miran248/issues/MIR-261) now runs Pi in a
-per-run container. The image is stage 4; this stage is verified against a
-fixture pin, and the shim names whatever digest the pin records.
+per-run container. The shim names whatever digest the pin records; the image
+itself is built and pinned in stage 4 ([images/README.md](../images/README.md)).
 
 `msbx-run` is the command the Multica runtime profile launches instead of the
 harness. It resolves the scope and the project, takes a lease, starts or
@@ -39,7 +39,8 @@ profile command  →  msbx-run  →  lease + msbx up  →  docker run <pin> pi "
 5. **Agent dir** — `$XDG_STATE_HOME/msbx/agents/<agent-id>/pi`, seeded once
    from the image's `/opt/msbx/agent/` plus `roles/<agent-name>/` and marked by
    `.msbx-seed` with the digest and the agent name. The seed is staged and
-   renamed, so a failed copy is not committed.
+   renamed, so a failed copy is not committed. A baseline change is a manual
+   reset: remove the dir and the next run seeds it.
 6. **Lease and box** — the lease is written before `msbx up --lease <task>`.
    The box renders `env/harness.env`; a manifest with services or tunnels adds
    the scope's Compose network. A checkout without a manifest runs on the

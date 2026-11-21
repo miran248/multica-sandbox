@@ -166,12 +166,27 @@ services and the harness.
 
 ## The image
 
-`msbx image build` builds the one image from this repository;
-`msbx image pin` records its digest and `msbx image show` prints it. The shim
-names the image by digest and refuses an absent pin or a moved tag. The
-container installs nothing at runtime; every package and toolchain version is
-in the image manifest. The agent dir is seeded once from the image baseline
-plus a role overlay and is never the host's `~/.pi`.
+`images/` holds the one image: a pinned Debian slim base, Pi standalone, the
+pinned Pi packages in a read-only tree, the baseline agent dir with role
+overlays, the Linux Multica CLI, and Node with pnpm, Rust with rustfmt and
+clippy, Go and Python 3. `images/manifest.json` is the only version source:
+the Dockerfile pins the base and toolchain images by digest, the Debian
+packages and every download by exact version and checksum, and asserts each
+one at build time.
+
+`msbx image build` builds `msbx-pi:<pi>-<n>` from this repository;
+`msbx image pin` resolves the tag, refuses a tag that moved since the build,
+and records `{image, digest, pi, versions, packages}`; `msbx image show`
+prints it. The shim names the image by digest and refuses an absent pin or a
+moved tag. A tag is never reused: the build counter counts local tags, the
+last build and the pin.
+
+The container installs nothing at runtime. The agent dir
+(`$XDG_STATE_HOME/msbx/agents/<agent-id>/pi`) is seeded once from the image
+baseline plus a role overlay and is never the host's `~/.pi`; a baseline
+change is a manual reset (remove the dir and run again). Pi's credentials come
+from the harness store, never from the image. See [images/README.md](images/README.md)
+for the contents, the pin, the entrypoint and the reset.
 
 ## Runtime registration
 
@@ -226,7 +241,7 @@ msbx image build && msbx image pin
 ```
 
 `msbx init` is idempotent and needs Docker running; the resolver install is the
-one `sudo` prompt. C8 needs the pinned harness image and records a skip until
+one `sudo` prompt. C8 runs against the pinned harness image and records a skip until
 `msbx image build && msbx image pin` has run. A lifecycle run needs the
 `msbx dns` unit installed (or a `msbx dns` started for the session) for the
 dotted names to resolve on the host; the harness container joins the scope

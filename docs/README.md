@@ -12,6 +12,9 @@
   it supersedes is [specs/0001-per-epic-sandbox.md](specs/0001-per-epic-sandbox.md).
 - Env and secrets: [env.md](env.md) — the three value layers, the render
   pipeline, the harness envelope and its stated limits.
+- Harness image: [../images/README.md](../images/README.md) — the Dockerfile,
+  `manifest.json`, the build and pin, the baseline agent dir and role overlays,
+  and the entrypoint.
 - Harness container shim: [wrapper.md](wrapper.md) — `msbx-run`, scope and
   project resolution, the four mounts, leases and sweeps, discovery from the
   pin, profile wiring and rollback.
