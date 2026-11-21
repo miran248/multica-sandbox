@@ -31,6 +31,21 @@ remote service into a generated sidecar on the epic network — addressed as
 run the same Postgres stack at once. The release into `main` is the remaining
 stage of [MIR-178](https://multica.ai/miran248/issues/MIR-178).
 
+## Install
+
+```sh
+brew install miran248/tap/msbx   # macOS, once the tap exists
+cargo install --path .           # before the tap, or without Homebrew
+msbx init                        # once after install
+```
+
+Both binaries — `msbx` and `msbx-run` — are installed. Run `msbx init` once
+after install; "Host setup" below describes what it installs and checks. The
+Homebrew install is a symlink under `$(brew --prefix)/bin`, which
+`brew upgrade` re-points, so the installed unit keeps working; if `msbx` was
+run from a versioned Cellar path, re-run `msbx init` after an upgrade to
+rewrite the unit.
+
 ## Host setup
 
 `msbx init` is the first command on a fresh host and is idempotent. On macOS 15
@@ -176,5 +191,5 @@ one `sudo` prompt. `--check` installs nothing while still running the C1–C7
 container checks, and `--keep` leaves those containers in place for inspection.
 A lifecycle run needs the `msbx dns` unit installed (or a `msbx dns` started for
 the session) for the dotted names to resolve on the host; the port mapping
-itself works without it. Install both binaries with `cargo install --path .`
-before pointing a runtime profile at `msbx-run`.
+itself works without it. Install both binaries as in [Install](#install) before
+pointing a runtime profile at `msbx-run`.
