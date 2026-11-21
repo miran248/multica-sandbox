@@ -28,7 +28,10 @@ Terms this repository uses in one specific sense.
 - **Driver** — the backend that creates and addresses containers. Docker
   Compose is the v1 target; the trait exists so the decision stays reversible.
 - **Init** — `msbx init`: the idempotent first-run setup on a fresh host. It
-  installs the `msbx.test` resolver, then runs the C1–C7 checks ([MIR-179]).
-  `--check` measures without changing the host.
+  installs the `msbx.test` resolver and the `msbx dns` unit, then runs the
+  C1–C7 checks ([MIR-178]). `--check` measures without changing the host.
+- **State** — `~/.local/state/msbx/state.json`: the port blocks and epic
+  bookkeeping `msbx` owns on this host. Written atomically under a lock and
+  outside every checkout; `gc` releases idle blocks from it.
 
-[MIR-179]: https://multica.ai/miran248/issues/MIR-179
+[MIR-178]: https://multica.ai/miran248/issues/MIR-178

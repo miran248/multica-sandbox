@@ -1,9 +1,10 @@
-//! The host-side primitives the init checks and `doctor` share: command capture,
-//! macOS version, TCP reachability and the small amount of JSON the
-//! `container` CLI returns.
+//! The host-side primitives `doctor`, `init` and the later verbs share: command
+//! capture, version parsing, terminal attachment and TCP reachability.
 
+use std::io::IsTerminal;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -31,7 +32,21 @@ impl Output {
 /// Run a program, capturing stdout and stderr. A missing binary is a failed
 /// output, never a panic.
 pub fn run(program: &str, args: &[&str]) -> Output {
-    match Command::new(program).args(args).output() {
+    run_command(Command::new(program).args(args))
+}
+
+/// Run a program in `dir`, capturing stdout and stderr.
+pub fn run_in(dir: &Path, program: &str, args: &[&str]) -> Output {
+    run_command(Command::new(program).args(args).current_dir(dir))
+}
+
+/// Run a program with arguments assembled at runtime.
+pub fn run_owned(program: &str, args: &[String]) -> Output {
+    run_command(Command::new(program).args(args))
+}
+
+fn run_command(command: &mut Command) -> Output {
+    match command.output() {
         Ok(output) => Output {
             ok: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout)
@@ -59,39 +74,19 @@ pub fn has(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Is the `container` service running?
-pub fn system_running() -> bool {
-    run("container", &["system", "status"]).ok || run("container", &["ls"]).ok
-}
-
-/// Where Apple's embedded DNS keeps the resolver file for `zone`. The domain
-/// lives in the file's `domain` line; the `containerization.` prefix is what
-/// `container system dns create` names it.
-pub fn resolver_path(zone: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("/etc/resolver/containerization.{zone}"))
-}
-
-/// Is `zone` registered with Apple's embedded DNS? Asks the CLI first, then
-/// falls back to the resolver file.
-pub fn dns_domain(zone: &str) -> bool {
-    let listed = run("container", &["system", "dns", "list", "--quiet"]);
-    if listed.ok && listed.stdout.lines().any(|line| line.trim() == zone) {
-        return true;
-    }
-    resolver_path(zone).exists()
-}
-
-/// Can this process ask for a password? `init` runs `sudo` only when it can.
+/// Can this process prompt for a password? `init` runs `sudo` only when it can.
 pub fn is_interactive() -> bool {
-    use std::io::IsTerminal;
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
-/// Run attached to the terminal: `sudo` needs it, and `container system start`
-/// shows its kernel download there. Returns whether the child succeeded.
+/// Run attached to the terminal: `sudo` needs it. Returns whether the child
+/// succeeded.
 pub fn run_attached(program: &str, args: &[&str]) -> bool {
     Command::new(program)
         .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -123,25 +118,66 @@ pub fn wait_for_tcp(address: SocketAddr, timeout: Duration) -> bool {
         if Instant::now() >= deadline {
             return false;
         }
-        sleep(Duration::from_millis(500));
+        sleep(Duration::from_millis(250));
     }
 }
 
-/// The first string value for `key` in a JSON document. Intentionally small:
-/// the init checks read one address out of `container inspect` and nothing else.
-pub fn json_string(json: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let start = json.find(&needle)? + needle.len();
-    let rest = json[start..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+/// The Docker Engine version reported by the daemon.
+pub fn engine_version() -> Result<String, String> {
+    let out = run("docker", &["version", "--format", "{{.Server.Version}}"]);
+    let version = out.stdout.trim();
+    if out.ok && !version.is_empty() {
+        Ok(version.to_string())
+    } else {
+        Err(first_line(&out).unwrap_or_else(|| "docker version failed".to_string()))
+    }
 }
 
-/// Accept `192.168.64.3` and `192.168.64.3/24`.
-pub fn ipv4_of(value: &str) -> Option<Ipv4Addr> {
-    value.split('/').next()?.trim().parse().ok()
+/// The Compose v2 plugin version, without the leading `v`.
+pub fn compose_version() -> Result<String, String> {
+    let out = run("docker", &["compose", "version", "--short"]);
+    let version = out.stdout.trim().trim_start_matches('v');
+    if out.ok && !version.is_empty() {
+        Ok(version.to_string())
+    } else {
+        Err(first_line(&out).unwrap_or_else(|| "docker compose version failed".to_string()))
+    }
+}
+
+/// `Some(server version)` when the Docker daemon answers.
+pub fn daemon_version() -> Option<String> {
+    let out = run("docker", &["info", "--format", "{{.ServerVersion}}"]);
+    let version = out.stdout.trim();
+    (out.ok && !version.is_empty()).then(|| version.to_string())
+}
+
+/// Is a dotted version at least `major.minor`? `28.2.2-desktop.1` counts as
+/// 28.2; a non-numeric prefix parses as 0.
+pub fn version_at_least(version: &str, major: u32, minor: u32) -> bool {
+    let version = version.trim().trim_start_matches('v');
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let found_major = parts.next().unwrap_or(0);
+    let found_minor = parts.next().unwrap_or(0);
+    (found_major, found_minor) >= (major, minor)
+}
+
+/// The first IPv4 address in `text`, ignoring ports and CIDR suffixes.
+pub fn first_ipv4(text: &str) -> Option<Ipv4Addr> {
+    text.split_whitespace().find_map(|token| {
+        let token = token.split('/').next()?.trim();
+        token.parse().ok()
+    })
+}
+
+fn first_line(out: &Output) -> Option<String> {
+    out.text()
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -149,39 +185,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_a_pretty_printed_field() {
-        let json = r#"{
-            "status": { "networks": [ { "ipv4Address" : "192.168.64.7/24" } ] }
-        }"#;
-        assert_eq!(
-            json_string(json, "ipv4Address").as_deref(),
-            Some("192.168.64.7/24")
-        );
+    fn compares_versions() {
+        assert!(version_at_least("28.2.2", 24, 0));
+        assert!(version_at_least("28.2.2-desktop.1", 24, 0));
+        assert!(version_at_least("2.36.2", 2, 24));
+        assert!(!version_at_least("2.20.0", 2, 24));
+        assert!(!version_at_least("23.0.6", 24, 0));
+        assert!(!version_at_least("", 1, 0));
     }
 
     #[test]
-    fn missing_field_is_none() {
-        assert_eq!(json_string("{}", "ipv4Address"), None);
-    }
-
-    #[test]
-    fn strips_the_prefix_length() {
+    fn parses_the_first_address() {
+        assert_eq!(first_ipv4("172.26.0.3"), Some(Ipv4Addr::new(172, 26, 0, 3)));
         assert_eq!(
-            ipv4_of("192.168.64.7/24"),
+            first_ipv4("192.168.64.7/24"),
             Some(Ipv4Addr::new(192, 168, 64, 7))
         );
-    }
-
-    #[test]
-    fn rejects_a_mac_address() {
-        assert_eq!(ipv4_of("aa:bb:cc:dd:ee:ff"), None);
-    }
-
-    #[test]
-    fn resolver_path_matches_apple_container_naming() {
-        assert_eq!(
-            resolver_path("msbx.test"),
-            std::path::PathBuf::from("/etc/resolver/containerization.msbx.test")
-        );
+        assert_eq!(first_ipv4("no address"), None);
     }
 }
