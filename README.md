@@ -6,9 +6,9 @@ service state, its own loopback ports and its own host names, so two epics can
 run Postgres on `5432` at the same time and both stay reachable from the host.
 
 ```
-pg.mir42.signals.msbx.test     →  127.0.0.1:23100   signals-mir42-pg
-web.mir42.signals.msbx.test    →  127.0.0.1:23101   signals-mir42-web
-pg.mir42.hours.msbx.test       →  127.0.0.1:23116   hours-mir42-pg
+pg.mir42.signals.msbx.test     →  127.0.0.1:23000   signals-mir42-pg
+web.mir42.signals.msbx.test    →  127.0.0.1:23001   signals-mir42-web
+pg.mir42.hours.msbx.test       →  127.0.0.1:23016   hours-mir42-pg
 ```
 
 `<role>.<epic>.<project>.msbx.test` is the name; `<project>-<epic>-<role>` is

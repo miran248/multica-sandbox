@@ -98,10 +98,13 @@ Rules:
   `127.0.0.1` ports from 23000 upward and records it. The block maps roles in
   `publish` order (`block+0`, `block+1`, …). The port is stable across restarts
   and is released by `gc` after `rm`.
-- `msbx` exports `MSBX_<ROLE>_HOST` and `MSBX_<ROLE>_PORT` (role uppercased,
-  `-` → `_`) to the harness and to the Compose process. Store values may use
+- For each published role, `msbx` exports `MSBX_<ROLE>_HOST` (the dotted
+  name) and `MSBX_<ROLE>_PORT` (the assigned loopback port, with `-` → `_` and
+  the role uppercased) to the harness and to the Compose process. Unpublished
+  roles have no host port and no `MSBX_<ROLE>_PORT`. Store values may use
   `{{host:<role>}}`, `{{port:<role>}}`, `{{epic}}` and `{{project}}`; `msbx`
-  substitutes them per epic at render time.
+  substitutes them per epic at render time. An unknown token, or `{{port:…}}`
+  for an unpublished role, is an error.
 - `msbx.test` is the only zone. `msbx dns` answers `A 127.0.0.1` for any name
   under it and `NXDOMAIN` for everything else. There is no dnsmasq, no
   `/etc/hosts` edit and no alias pool.
@@ -152,6 +155,9 @@ The store is outside every checkout:
   scripts.
 - `gc` — remove epics idle for 14 days and release stale blocks; `--dry-run`
   lists what it would remove. There is no background daemon in v1.
+- Idempotence — `up` reconciles and changes nothing when the box is current;
+  `down` and `rm` are no-ops on an absent box, never an error; `status`,
+  `env ls` and `gc --dry-run` only read; `gc` and `init` are safe to repeat.
 - `msbx` refuses a checkout outside `$HOME` and refuses a workdir under
   `~/projects`.
 
@@ -181,7 +187,8 @@ shipped in this repository. It runs on the host and:
    is a loud error, not a silent default.
 3. If the checkout has a manifest: `msbx up`, then evaluates
    `msbx env export`; otherwise passes through untouched.
-4. `--probe` and `--list-models` launches never start a box.
+4. `--probe` and `--list-models` launches never start a box, never fail on a
+   Docker or resolver problem, and exit with the real `dsh`'s status.
 5. A failed `up` fails the launch by default; `MSBX_RUN_SOFT=1` passes the
    prompt through with the failure printed.
 6. Executes the real `dsh` with the original arguments and stdin.
@@ -197,6 +204,11 @@ the role is local or remote, and nothing is published on the host.
 ## Verification
 
 - `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
+- CI — the repository's GitHub Actions workflow on `ubuntu-latest` runs
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo build --locked` and `cargo test --locked` on every pull request. From
+  stage 2 on it also runs `msbx init --check`, so the Linux C1–C7 table is
+  recorded by CI rather than claimed.
 - `msbx init` runs C1–C7 against a synthetic project and prints
   `PASS`/`FAIL`/`SKIP` with observed values; non-zero exit on any non-PASS.
   - C1 host — Docker Engine ≥ 24, Compose ≥ 2.24, daemon reachable, resolver
