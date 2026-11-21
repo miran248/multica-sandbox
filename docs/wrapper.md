@@ -3,6 +3,11 @@
 Status: delivered by [MIR-261](https://multica.ai/miran248/issues/MIR-261),
 stage 5 of [MIR-178](https://multica.ai/miran248/issues/MIR-178).
 
+Amended by [spec 0002](specs/0002-container-harness.md): `msbx-run` becomes the
+container shim, resolves a scope instead of an epic, and runs Pi in the pinned
+image with the task mounts rather than exec'ing a host harness. This page
+records the MIR-178 delivery until the stage-3 ticket rewrites it.
+
 `msbx-run` is the command the Multica runtime profile launches instead of the
 harness. It still runs the harness on the host: it only decides which epic the
 task belongs to, starts that epic's box, exports the rendered envelope and then

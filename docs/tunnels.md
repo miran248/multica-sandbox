@@ -6,6 +6,10 @@ service is a tunnel sidecar inside the epic's network, addressed exactly like a
 local role: one role name, one container port, the same dotted alias, no host
 port forwarding.
 
+Amended by [spec 0002](specs/0002-container-harness.md): the network and names
+belong to a scope, not an epic, and the harness container joins that network.
+The transports and their limits are unchanged.
+
 ## The manifest
 
 ```yaml

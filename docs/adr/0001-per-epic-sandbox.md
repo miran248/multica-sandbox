@@ -4,6 +4,10 @@ Status: accepted. Revision 2 (2026-11-21) replaced the Apple `container`
 substrate of revision 1 with Docker Compose after the stage-1 init run showed
 the Apple driver needs macOS 26, which this Mac does not run and Linux cannot
 run at all. Rejected alternatives are recorded under "Substrate revision".
+Decisions 1, 2 and 12 are superseded by
+[ADR 0002](0002-container-harness.md): the harness moves into a per-run
+container, the box's unit becomes the scope, and the key comes from the task
+context. The rest stands.
 
 ## Context
 

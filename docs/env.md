@@ -5,6 +5,12 @@ stage 4 of [MIR-178](https://multica.ai/miran248/issues/MIR-178). The manifest
 lists names; `msbx` resolves the values outside every checkout, renders them per
 epic, and injects them into the epic's services and the harness.
 
+Amended by [spec 0002](specs/0002-container-harness.md): the render is
+per-scope, `{{scope}}` replaces `{{epic}}`, a host store sits below the project
+store with the `host-allow` allowlist, and a harness-only store carries the
+model credential and the GitHub token outside every service envelope. This page
+records the MIR-178 delivery until the stage-2 and stage-3 tickets rewrite it.
+
 ## The store
 
 ```
