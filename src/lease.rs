@@ -27,8 +27,9 @@ use std::time::{Duration, Instant, SystemTime};
 /// A lease older than this is stale even when its PID still exists (a reused
 /// PID must not pin a box forever).
 pub const STALE_AFTER: u64 = 24 * 60 * 60;
-/// How long the last-lease check waits for another shim's lock.
-const LOCK_WAIT: Duration = Duration::from_secs(3);
+/// How long a lease write or the last-lease check waits for the other. The
+/// check holds the lock through `msbx down`, so the wait must cover a stop.
+const LOCK_WAIT: Duration = Duration::from_secs(30);
 /// A lock older than this is treated as a crash, not a live writer.
 const STALE_LOCK: Duration = Duration::from_secs(60);
 
@@ -112,56 +113,87 @@ fn live_in(dir: &Path, at: u64) -> io::Result<Vec<Lease>> {
     Ok(leases)
 }
 
-/// Drop the stale claims for one box and name the tasks that were swept.
-pub fn sweep(project: &str, scope: &str, at: u64) -> io::Result<Vec<String>> {
-    sweep_in(&dir(project, scope), at)
-}
-
-fn sweep_in(dir: &Path, at: u64) -> io::Result<Vec<String>> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
+/// Drop every stale claim under the leases root, including a scope that has no
+/// box and therefore no state entry (a manifest-less run). Labels are
+/// `project/scope/task`.
+pub fn sweep_all(at: u64) -> io::Result<Vec<String>> {
+    let root = state::state_dir().join("leases");
     let mut dropped = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+    for (project, scope, path) in walk(&root)? {
+        let keep = read(&path).is_some_and(|lease| !stale(&lease, at));
+        if keep {
             continue;
         }
-        let keep = read(&path).is_some_and(|lease| !stale(&lease, at));
-        if !keep {
-            let task = path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let _ = fs::remove_file(&path);
-            dropped.push(task);
+        let task = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if fs::remove_file(&path).is_ok() {
+            dropped.push(format!("{project}/{scope}/{task}"));
         }
     }
     dropped.sort();
     Ok(dropped)
 }
 
-/// The task names with a stale claim, without removing anything. `gc
+/// Every stale claim under the leases root, without removing anything. `gc
 /// --dry-run` uses it to list what the sweep would drop.
-pub fn stale_tasks(project: &str, scope: &str, at: u64) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir(project, scope)) else {
-        return Vec::new();
-    };
-    let mut tasks: Vec<String> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
-        .filter(|path| !read(path).is_some_and(|lease| !stale(&lease, at)))
-        .filter_map(|path| {
-            path.file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-        })
-        .collect();
+pub fn stale_all(at: u64) -> Vec<String> {
+    let root = state::state_dir().join("leases");
+    let mut tasks = Vec::new();
+    for (project, scope, path) in walk(&root).unwrap_or_default() {
+        if read(&path).is_some_and(|lease| !stale(&lease, at)) {
+            continue;
+        }
+        let task = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_default();
+        tasks.push(format!("{project}/{scope}/{task}"));
+    }
     tasks.sort();
     tasks
+}
+
+/// `leases/<project>/<scope>/<task>.json`, one level at a time. A `.lock` is
+/// not a claim; every other non-JSON file is ignored.
+fn walk(root: &Path) -> io::Result<Vec<(String, String, PathBuf)>> {
+    let mut found = Vec::new();
+    let projects = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(found),
+        Err(error) => return Err(error),
+    };
+    for project in projects {
+        let project = project?;
+        if !project.file_type()?.is_dir() {
+            continue;
+        }
+        let project_name = project.file_name().to_string_lossy().to_string();
+        let scopes = match fs::read_dir(project.path()) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for scope in scopes {
+            let scope = scope?;
+            if !scope.file_type()?.is_dir() {
+                continue;
+            }
+            let scope_name = scope.file_name().to_string_lossy().to_string();
+            let entries = match fs::read_dir(scope.path()) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                    found.push((project_name.clone(), scope_name.clone(), path));
+                }
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// Read a lease without dropping anything. `status` uses this: it reports, it

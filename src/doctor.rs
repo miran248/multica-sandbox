@@ -159,16 +159,7 @@ pub fn run() -> ExitCode {
         }
     }
 
-    let at = state::now();
-    let mut stale = 0usize;
-    if let Ok(state) = Allocator::default_path().store().load() {
-        for entry in state.blocks.values() {
-            if let (Some(project), Some(scope)) = (entry.project.as_deref(), entry.scope.as_deref())
-            {
-                stale += lease::stale_tasks(project, scope, at).len();
-            }
-        }
-    }
+    let stale = lease::stale_all(state::now()).len();
     if stale > 0 {
         println!("[warn] {stale} stale lease(s); run `msbx gc`");
         warnings += 1;

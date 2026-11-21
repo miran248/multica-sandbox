@@ -37,7 +37,10 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, ExitStatus, Output, Stdio};
+use std::process::{Child, Command, ExitCode, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// The shim's name in every message it writes.
 const NAME: &str = "msbx-run";
@@ -68,6 +71,95 @@ impl fmt::Display for Failure {
 }
 
 impl std::error::Error for Failure {}
+
+/// A SIGINT/SIGTERM/SIGHUP that must release the lease and stop the container.
+/// The handler runs on the signal thread; the main thread waits for the
+/// attached `docker run` child and then does the normal lease cleanup.
+struct Signals {
+    interrupted: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+impl Signals {
+    /// Install the handler before the box starts, so a signal during `up` or
+    /// the seed still reaches the cleanup path. The handler removes the
+    /// container by name and kills the attached client.
+    fn install(container: &str) -> Result<Signals, Failure> {
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+        let flag = Arc::clone(&interrupted);
+        let slot = Arc::clone(&child);
+        let name = container.to_string();
+        ctrlc::set_handler(move || {
+            flag.store(true, Ordering::SeqCst);
+            stop_container(&name);
+            if let Ok(mut slot) = slot.lock() {
+                if let Some(child) = slot.as_mut() {
+                    let _ = child.kill();
+                }
+            }
+        })
+        .map_err(|error| Failure::new(format!("cannot install the signal handler: {error}")))?;
+        Ok(Signals { interrupted, child })
+    }
+
+    fn interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::SeqCst)
+    }
+
+    fn hold(&self, child: Child) {
+        if let Ok(mut slot) = self.child.lock() {
+            *slot = Some(child);
+        }
+    }
+
+    /// Poll the attached client so the signal thread can take the shared slot
+    /// at any time. Waiting under the lock would make the handler wait for the
+    /// whole run.
+    fn wait(&self) -> Result<ExitStatus, Failure> {
+        loop {
+            {
+                let mut slot = self
+                    .child
+                    .lock()
+                    .map_err(|_| Failure::new("the signal handler lost the container state"))?;
+                let child = slot
+                    .as_mut()
+                    .ok_or_else(|| Failure::new("the container process was not recorded"))?;
+                match child.try_wait() {
+                    Ok(Some(status)) => return Ok(status),
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(Failure::new(format!(
+                            "cannot wait for the harness container: {error}"
+                        )))
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Stop the container after a signal that arrived before the child was
+    /// recorded, or between the handler's attempt and the spawn.
+    fn stop(&self, container: &str) {
+        stop_container(container);
+        if let Ok(mut slot) = self.child.lock() {
+            if let Some(child) = slot.as_mut() {
+                let _ = child.kill();
+            }
+        }
+    }
+}
+
+fn stop_container(container: &str) {
+    let _ = Command::new("docker")
+        .args(["rm", "-f", container])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
 
 /// The shim entry point.
 pub fn run(args: &[OsString]) -> ExitCode {
@@ -200,7 +292,11 @@ fn launch(args: &[OsString], root: &Path) -> Result<ExitCode, Failure> {
         session: session_dir(args, root)?,
         agent: state::agent_dir(&agent.id),
     };
+    let signals = Signals::install(&container)?;
     seed_agent_dir(&pin, &agent, identity.as_deref())?;
+    if signals.interrupted() {
+        return Ok(ExitCode::from(130));
+    }
 
     // The lease is on disk before the box starts: a crash between the two
     // leaves a claim the next sweep can read.
@@ -211,6 +307,10 @@ fn launch(args: &[OsString], root: &Path) -> Result<ExitCode, Failure> {
         container: container.clone(),
     };
     let mut claim = Claim::take(key.clone(), manifest.is_some(), lease)?;
+    if signals.interrupted() {
+        drop(claim);
+        return Ok(ExitCode::from(130));
+    }
 
     let mut network = None;
     let mut harness_env = None;
@@ -305,9 +405,8 @@ fn launch(args: &[OsString], root: &Path) -> Result<ExitCode, Failure> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    let status = command.status();
-    let code = match status {
-        Ok(status) => exit_code(status),
+    let child = match command.spawn() {
+        Ok(child) => child,
         Err(error) => {
             let _ = claim.release();
             let _ = down_if_last(&key, manifest.is_some());
@@ -316,6 +415,14 @@ fn launch(args: &[OsString], root: &Path) -> Result<ExitCode, Failure> {
             )));
         }
     };
+    signals.hold(child);
+    if signals.interrupted() {
+        // The signal arrived while the child was being recorded; the handler
+        // could not see it yet.
+        signals.stop(&container);
+    }
+    let status = signals.wait()?;
+    let code = exit_code(status);
 
     if let Err(error) = claim.release() {
         eprintln!("{NAME}: cannot release the lease for `{scope}`: {error}");
@@ -323,7 +430,11 @@ fn launch(args: &[OsString], root: &Path) -> Result<ExitCode, Failure> {
     if let Err(error) = down_if_last(&key, manifest.is_some()) {
         eprintln!("{NAME}: {error}");
     }
-    Ok(code)
+    if signals.interrupted() {
+        Ok(ExitCode::from(130))
+    } else {
+        Ok(code)
+    }
 }
 
 /// Release the lease and, when it was the last one, stop a lease-managed box.
@@ -369,6 +480,16 @@ struct Claim {
 
 impl Claim {
     fn take(key: Key, has_box: bool, lease: Lease) -> Result<Claim, Failure> {
+        // The same lock the last-lease check takes: a run that starts as the
+        // previous one exits either writes before that check (and keeps the
+        // box) or waits for the stop and starts it again. Without it, a run
+        // could write after the check and lose its box to the outgoing down.
+        let _lock = lease::Lock::acquire(key.project(), key.scope()).map_err(|error| {
+            Failure::new(format!(
+                "cannot lock the leases for scope `{}`: {error}",
+                key.scope()
+            ))
+        })?;
         lease::write(key.project(), key.scope(), &lease).map_err(|error| {
             Failure::new(format!(
                 "cannot write the lease for scope `{}`: {error}",

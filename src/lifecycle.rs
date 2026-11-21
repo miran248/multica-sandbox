@@ -668,20 +668,17 @@ fn gc(options: &Options) -> Result<(), Failure> {
         .load()
         .map_err(|error| Failure::run(format!("cannot read the state: {error}")))?;
 
-    // Drop stale claims from every box before anything else: a killed shim's
-    // lease must not keep a sibling scope's box from being swept.
-    let mut stale_leases = Vec::new();
-    for entry in state.blocks.values() {
-        let (Some(project), Some(scope)) = (entry.project.as_deref(), entry.scope.as_deref())
-        else {
-            continue;
-        };
-        if options.dry_run {
-            stale_leases.extend(lease::stale_tasks(project, scope, at));
-        } else if let Ok(dropped) = lease::sweep(project, scope, at) {
-            stale_leases.extend(dropped);
-        }
-    }
+    // Drop stale claims from every run before anything else. The walk covers a
+    // manifest-less run, which writes a lease but no block, so its killed shim
+    // cannot leave a claim behind forever.
+    let stale_leases = if options.dry_run {
+        lease::stale_all(at)
+    } else {
+        lease::sweep_all(at).unwrap_or_else(|error| {
+            eprintln!("msbx gc: cannot sweep the leases: {error}");
+            Vec::new()
+        })
+    };
 
     let mut plans = Vec::new();
     for (key, entry) in &state.blocks {

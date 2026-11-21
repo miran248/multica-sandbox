@@ -166,6 +166,11 @@ if [ "$1" = run ]; then
     *--list-models*) printf 'model-a\nmodel-b\n' ;;
     *--probe*) printf 'probe ok\n' ;;
   esac
+  case "$*" in
+    *" --name "*)
+      if [ -f '{run_sleep}' ]; then exec sleep 30; fi
+      ;;
+  esac
   if [ -n "${{FAKE_READ_STDIN:-}}" ]; then IFS= read -r line; printf 'STDIN %s\n' "$line"; fi
   exit "${{FAKE_EXIT:-0}}"
 fi
@@ -176,6 +181,7 @@ exit 0
             orphan_id = self.root.join("orphan-id").display(),
             orphan_name = self.root.join("orphan-name").display(),
             orphan_lease = self.root.join("orphan-lease").display(),
+            run_sleep = self.root.join("run_sleep").display(),
         );
         Self::write(&self.bin.join("docker"), &script);
     }
@@ -302,9 +308,33 @@ exit 1
         fs::read_to_string(self.root.join("multica.log")).unwrap_or_default()
     }
 
+    fn hold_run(&self) {
+        fs::write(self.root.join("run_sleep"), "").unwrap();
+    }
+
     fn clear_log(&self) {
         let _ = fs::remove_file(self.root.join("docker.log"));
         let _ = fs::remove_file(self.root.join("multica.log"));
+    }
+
+    fn msbx(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_msbx"))
+            .args(args)
+            .current_dir(&self.checkout)
+            .env("HOME", &self.home)
+            .env("XDG_STATE_HOME", &self.state_home)
+            .env("XDG_CONFIG_HOME", &self.config_home)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("MULTICA_CLI_PATH", self.bin.join("multica"))
+            .output()
+            .unwrap()
     }
 
     fn state(&self) -> Value {
@@ -703,23 +733,7 @@ fn a_stale_lease_is_dropped_by_up_and_by_gc() {
 
     fixture.write_lease("dead-again", 4_200_000, now());
     fixture.clear_log();
-    let gc = Command::new(env!("CARGO_BIN_EXE_msbx"))
-        .args(["gc", "--dry-run"])
-        .current_dir(&fixture.checkout)
-        .env("HOME", &fixture.home)
-        .env("XDG_STATE_HOME", &fixture.state_home)
-        .env("XDG_CONFIG_HOME", &fixture.config_home)
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.bin.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env("MULTICA_CLI_PATH", fixture.bin.join("multica"))
-        .output()
-        .unwrap();
+    let gc = fixture.msbx(&["gc", "--dry-run"]);
     assert!(gc.status.success(), "{}", stderr(&gc));
     assert!(
         stdout(&gc).contains("would drop 1 stale lease(s)"),
@@ -729,6 +743,47 @@ fn a_stale_lease_is_dropped_by_up_and_by_gc() {
     assert!(
         fixture.lease_dir().join("dead-again.json").is_file(),
         "a dry run drops nothing"
+    );
+}
+
+#[test]
+fn gc_drops_a_stale_lease_for_a_scope_with_no_box() {
+    let fixture = Fixture::new("ghost-lease");
+    let dir = fixture
+        .state_home
+        .join("msbx")
+        .join("leases")
+        .join("ghost")
+        .join("mir-99");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("dead.json"),
+        format!(
+            "{{\"task\":\"dead\",\"pid\":4200000,\"started_at\":{},\"container\":\"ghost-mir-99-harness-dead\"}}\n",
+            now()
+        ),
+    )
+    .unwrap();
+
+    let dry = fixture.msbx(&["gc", "--dry-run"]);
+    assert!(dry.status.success(), "{}", stderr(&dry));
+    assert!(
+        stdout(&dry).contains("would drop 1 stale lease(s): ghost/mir-99/dead"),
+        "{}",
+        stdout(&dry)
+    );
+    assert!(dir.join("dead.json").is_file(), "a dry run drops nothing");
+
+    let swept = fixture.msbx(&["gc"]);
+    assert!(swept.status.success(), "{}", stderr(&swept));
+    assert!(
+        stdout(&swept).contains("dropped 1 stale lease(s): ghost/mir-99/dead"),
+        "{}",
+        stdout(&swept)
+    );
+    assert!(
+        !dir.join("dead.json").exists(),
+        "the manifest-less lease is gone"
     );
 }
 
@@ -753,23 +808,7 @@ fn a_killed_shims_orphan_container_is_swept() {
     .unwrap();
     fixture.clear_log();
 
-    let gc = Command::new(env!("CARGO_BIN_EXE_msbx"))
-        .args(["gc"])
-        .current_dir(&fixture.checkout)
-        .env("HOME", &fixture.home)
-        .env("XDG_STATE_HOME", &fixture.state_home)
-        .env("XDG_CONFIG_HOME", &fixture.config_home)
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.bin.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env("MULTICA_CLI_PATH", fixture.bin.join("multica"))
-        .output()
-        .unwrap();
+    let gc = fixture.msbx(&["gc"]);
     assert!(gc.status.success(), "{}", stderr(&gc));
     assert!(
         fixture.log().contains("rm -f container-id"),
@@ -951,6 +990,62 @@ fn a_docker_failure_is_loud_and_has_no_host_harness_fallback() {
         stderr(&output)
     );
     assert!(!fixture.root.join("harness.log").exists());
+}
+
+#[test]
+fn a_signalled_shim_releases_its_lease_and_removes_its_container() {
+    let fixture = Fixture::new("signal").with_manifest(MANIFEST);
+    fixture.hold_run();
+    let mut command = fixture.command(&["task"], &[("MSBX_SCOPE", "mir-42")]);
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null());
+    let mut child = command.spawn().unwrap();
+
+    let lease = fixture
+        .lease_dir()
+        .join(format!("{}.json", fixture.task_id));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if !container_runs(&fixture.log()).is_empty() && lease.is_file() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        !container_runs(&fixture.log()).is_empty() && lease.is_file(),
+        "the task container and lease started:\n{}",
+        fixture.log()
+    );
+
+    let sent = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success(), "SIGTERM was delivered");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("the signalled shim did not exit:\n{}", fixture.log());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    assert_eq!(status.code(), Some(130), "the signalled shim exits 130");
+    assert!(!lease.exists(), "the lease was released on the signal");
+    let task8 = &fixture.task_id[..8];
+    assert!(
+        fixture
+            .log()
+            .contains(&format!("rm -f signals-mir-42-harness-{task8}")),
+        "the handler removed the container:\n{}",
+        fixture.log()
+    );
 }
 
 fn now() -> u64 {

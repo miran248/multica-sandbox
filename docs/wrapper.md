@@ -49,7 +49,9 @@ profile command  →  msbx-run  →  lease + msbx up  →  docker run <pin> pi "
    digest, then Pi's argv verbatim.
 8. **Exit** — the container's status becomes the shim's. The lease is released;
    when it was the last live lease and `up` marked the box lease-managed, the
-   shim runs `msbx down` (volumes, envelope and block stay).
+   shim runs `msbx down` (volumes, envelope and block stay). A SIGINT, SIGTERM
+   or SIGHUP removes the container, releases the lease, runs the same last-lease
+   check and exits 130.
 
 ## The four mounts
 
@@ -97,8 +99,10 @@ killed before it can release is therefore cleaned up: its container by the
 label, its lease by the PID check. `gc --dry-run` lists both without changing
 anything.
 
-The last-lease check takes a lock beside the leases, so two shims exiting
-together cannot both leave the box up, or both stop it.
+The lease write and the last-lease check take the same lock beside the leases.
+A run that starts as the previous one exits either records its lease before the
+check (and keeps the box) or waits for the stop and starts the box again; two
+shims exiting together cannot both leave it up, or both stop it.
 
 ## Failure modes
 
@@ -110,7 +114,8 @@ together cannot both leave the box up, or both stop it.
 | `msbx up` fails | exit 1, lease released, no container |
 | Container cannot launch | exit 1, lease released, box stopped if last |
 | Container exits non-zero | that status is the shim's |
-| Shim is killed | stale lease and orphan container are swept by the next `up`/`gc` |
+| SIGINT, SIGTERM or SIGHUP | container removed, lease released, last-lease check, exit 130 |
+| Shim is SIGKILLed | stale lease and orphan container are swept by the next `up`/`gc` |
 
 There is no host-harness fallback and no soft mode: a stopped Docker fails the
 run loudly. `MSBX_RUN_SOFT` is retired.
@@ -139,8 +144,9 @@ harness and remove the shim from `PATH`. Boxes and leases stay; `msbx down
   repository: project trust `always` loads the mounted `.pi/` and `AGENTS.md`.
   The blast radius is the checkout, the session, the task token and the daemon
   port — no host home, SSH key or Docker socket.
-- A signal that kills the shim before its normal exit leaves cleanup to the next
-  `up` or `gc`. There is no background supervisor in v1.
+- SIGINT, SIGTERM and SIGHUP are handled; a SIGKILL has no cleanup hook, so its
+  stale lease and orphan container are left to the next `up` or `gc`. There is
+  no background supervisor in v1.
 - `--version` records no image build time, and `--probe` reports the image's
   answer, not the box's health.
 - Probes read the harness store only; a project store value is not available to
