@@ -1,15 +1,23 @@
 [package]
 name = "multica-sandbox"
 version = "0.1.0"
+default-run = "msbx"
 edition = "2021"
 description = "Per-epic sandbox environments for Multica work"
 license = "MIT"
+
+[lib]
+name = "multica_sandbox"
+path = "src/lib.rs"
 
 [[bin]]
 name = "msbx"
 path = "src/main.rs"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
 
 [profile.release]
 lto = true

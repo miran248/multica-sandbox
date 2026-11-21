@@ -20,3 +20,17 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --locked
       - run: cargo test --locked
+      # C1 records the resolver install a hosted runner cannot perform; the
+      # table is the artifact, so this step does not gate the build.
+      - name: msbx init --check (records the Linux C1-C7 table)
+        timeout-minutes: 20
+        run: |
+          set +e
+          cargo run --locked -- init --check > msbx-init.txt 2>&1
+          status=$?
+          {
+            echo '```'
+            cat msbx-init.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "msbx init --check exited $status (the table is the artifact)"
