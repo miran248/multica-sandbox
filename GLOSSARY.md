@@ -18,10 +18,16 @@ Terms this repository uses in one specific sense.
 - **Manifest** — `<repo>/.multica/compose.yaml`: a standard Compose file plus
   the `x-msbx` block. `docker compose` reads it unchanged.
 - **Store** — the per-project values outside every checkout
-  (`~/.config/msbx/projects/<project>/`): `env` and `secrets/<name>`.
-- **Envelope** — the rendered, per-epic env files and secret mounts
-  (`~/.local/state/msbx/<project>/<epic>/`). Materialized, never mounted
-  through the checkout.
+  (`$XDG_CONFIG_HOME/msbx/projects/<project>/`, default
+  `~/.config/msbx/projects/<project>/`): `env` (`NAME=value` lines) and
+  `secrets/<NAME>` (one value per file). The manifest lists names, never values.
+- **Envelope** — the rendered, per-epic material under
+  `$XDG_STATE_HOME/msbx/<project>/<epic>/`, mode 0600: `env/<role>.env`,
+  `env/harness.env` (the harness envelope) and `secrets/<NAME>`. Materialized,
+  never mounted through the checkout.
+- **Token** — a `{{host:<role>}}`, `{{port:<role>}}`, `{{epic}}` or `{{project}}`
+  placeholder in a store value. `msbx` substitutes it per epic at render time;
+  an unknown token is an error.
 - **Override** — the generated Compose file that carries container names,
   aliases, loopback ports, env files and tunnel sidecars. Regenerated on every
   `up`; the only place those decisions live.

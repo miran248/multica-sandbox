@@ -14,15 +14,21 @@ Usage:
   msbx rm [--epic E] [--project P] [--yes]      Destroy the box and its volumes
   msbx status [--epic E] [--project P] [--json] Show boxes, health and ports
   msbx gc [--dry-run]                           Remove boxes idle for 14 days
+  msbx env ls|export [--epic E] [--project P]   List the harness names, or export them
   msbx doctor                                   Diagnose the Docker host; changes nothing
   msbx init [--check] [--keep]                  Set up the host, then run the driver checks
   msbx dns [--listen ADDR]                      Serve the msbx.test resolver
   msbx --version
   msbx --help
 
-`up` reads `.multica/compose.yaml` (or `--file`), gives the epic its port block,
-writes the generated override outside the checkout and starts the Compose
-project. The epic is `--epic` or `MSBX_EPIC`; the wrapper supplies it for a task.
+`up` reads `.multica/compose.yaml` (or `--file`), resolves the project's env and
+secret names from `$XDG_CONFIG_HOME/msbx/projects/<project>/`, gives the epic its
+port block, writes the generated envelope and override outside the checkout and
+starts the Compose project. The epic is `--epic` or `MSBX_EPIC`; the wrapper
+supplies it for a task.
+
+`env ls` prints the harness envelope's names without values; `env export` prints
+shell-safe exports for the harness. Both read what the last `up` rendered.
 
 `init` installs the msbx.test resolver and the msbx dns unit (or prints the one
 privileged command it needs), then runs C1-C7 against a synthetic two-epic
@@ -49,6 +55,7 @@ fn main() -> ExitCode {
         Some("rm") => lifecycle::run_rm(&args[1..]),
         Some("status") => lifecycle::run_status(&args[1..]),
         Some("gc") => lifecycle::run_gc(&args[1..]),
+        Some("env") => lifecycle::run_env(&args[1..]),
         Some("doctor") => doctor::run(),
         Some("init") => init::run(&args[1..]),
         Some("dns") => run_dns(&args[1..]),

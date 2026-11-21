@@ -1,26 +1,29 @@
-//! The Compose lifecycle: `up`, `down`, `rm`, `status` and `gc`.
+//! The Compose lifecycle: `up`, `down`, `rm`, `status`, `gc` and the env verbs.
 //!
 //! One epic is one Compose project (`<project>-<epic>`). `up` validates the
-//! manifest, gives the epic its port block, renders the override (container
-//! names, dotted aliases, loopback ports, network name) into the epic's envelope
+//! manifest, resolves the project's env and secret names from the store, gives
+//! the epic its port block, renders the envelope (per-role env files, secret
+//! files, harness env) and the override (container names, dotted aliases,
+//! loopback ports, env files, secret mounts, network name) into the epic's
 //! directory outside the checkout, runs `docker compose up -d --wait` and
 //! records what it did. `down` stops the containers and keeps the volumes; `rm`
 //! destroys the project, its volumes and its block; `status` reports services,
 //! health and ports; `gc` destroys boxes idle for 14 days and frees their
-//! blocks.
+//! blocks. `env ls` and `env export` read the rendered harness envelope.
 //!
-//! Nothing here renders the env store or tunnels: those are later stages
-//! ([MIR-260], [MIR-262]). The override is still the only place names, ports
-//! and the Compose project are decided.
+//! Nothing here prints a value from the store: names, roles and paths only.
+//! The override is still the only place names, ports and the Compose project
+//! are decided; tunnels are a later stage ([MIR-262]).
 //!
-//! [MIR-260]: https://multica.ai/miran248/issues/MIR-260
 //! [MIR-262]: https://multica.ai/miran248/issues/MIR-262
 
 use crate::driver;
+use crate::env::{self, Envelope};
 use crate::epic::{self, Key};
 use crate::manifest::Manifest;
 use crate::ports::{Allocator, Block, EpicMeta, IDLE_SECS};
 use crate::state::{self, Entry};
+use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -60,6 +63,13 @@ usage: msbx gc [--dry-run]
 
 Remove boxes idle for 14 days and release their port blocks. `--dry-run` only
 lists them.
+";
+const ENV_USAGE: &str = "\
+usage: msbx env ls|export [--epic E] [--project P]
+
+`ls` prints the harness envelope's names without values; `export` prints
+shell-safe `export NAME=value` lines for the harness. The epic is `--epic`, else
+`MSBX_EPIC`; `msbx up` must have rendered the epic first.
 ";
 
 /// Why a verb did not finish. Usage errors exit 64, runtime errors 1.
@@ -185,6 +195,67 @@ pub fn run_gc(args: &[String]) -> ExitCode {
     finish("gc", result)
 }
 
+pub fn run_env(args: &[String]) -> ExitCode {
+    if wants_help(args) {
+        print!("{ENV_USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    finish("env", env_command(args))
+}
+
+/// `env ls|export`: read the harness envelope `up` rendered for one box.
+fn env_command(args: &[String]) -> Result<(), Failure> {
+    let (verb, rest) = args
+        .split_first()
+        .ok_or_else(|| Failure::Usage(format!("`env` needs `ls` or `export`\n\n{ENV_USAGE}")))?;
+    let export = match verb.as_str() {
+        "ls" => false,
+        "export" => true,
+        other => {
+            return Err(Failure::Usage(format!(
+                "`{other}` is not an `env` verb (`ls` or `export`)\n\n{ENV_USAGE}"
+            )))
+        }
+    };
+    let options = parse(rest, &["--epic", "--project"], ENV_USAGE)?;
+    let epic = resolve_epic(options.epic.as_deref())?;
+    let selected = select(&Options {
+        epic: Some(epic.clone()),
+        project: options.project,
+        ..Options::default()
+    })?;
+    let (key, entry) = match selected.as_slice() {
+        [only] => only,
+        [] => {
+            return Err(Failure::run(format!(
+                "no box for `{epic}`; run `msbx up` first"
+            )))
+        }
+        _ => unreachable!("select refuses several boxes for one epic"),
+    };
+    let project = entry.project.as_deref().ok_or_else(|| {
+        Failure::run(format!(
+            "{key} has no recorded project; run `msbx up` again"
+        ))
+    })?;
+    let epic = entry
+        .epic
+        .as_deref()
+        .ok_or_else(|| Failure::run(format!("{key} has no recorded epic; run `msbx up` again")))?;
+    let harness = Envelope::read_harness(&state::epic_dir(project, epic))
+        .map_err(|error| Failure::run(error.to_string()))?;
+    if export {
+        for (name, value) in &harness {
+            println!("{}", env::export_line(name, value));
+        }
+    } else {
+        for name in harness.keys() {
+            println!("{name}");
+        }
+    }
+    Ok(())
+}
+
 fn up(options: &Options) -> Result<(), Failure> {
     let (manifest_path, root) = locate(options.file.as_deref())?;
     within_home(&root)?;
@@ -194,6 +265,13 @@ fn up(options: &Options) -> Result<(), Failure> {
     let epic = resolve_epic(options.epic.as_deref())?;
     let key = Key::new(&project, &epic).map_err(|error| Failure::run(error.to_string()))?;
     epic::check_publish(&manifest).map_err(|error| Failure::run(error.to_string()))?;
+
+    // Resolve every declared name before a block is spent or a container
+    // starts: a missing value names the name and stops `up` here.
+    let store = Store::for_project(&project);
+    let values = store
+        .values(&manifest)
+        .map_err(|error| Failure::run(error.to_string()))?;
 
     let allocator = Allocator::default_path();
     let state_key = key.compose_project();
@@ -210,8 +288,17 @@ fn up(options: &Options) -> Result<(), Failure> {
 
     let published =
         epic::published(&manifest, block).map_err(|error| Failure::run(error.to_string()))?;
+    let envelope = Envelope::render(&key, &manifest, &published, &values)
+        .map_err(|error| Failure::run(error.to_string()))?;
+    envelope.write().map_err(|error| {
+        Failure::run(format!(
+            "cannot write the envelope {}: {error}",
+            envelope.dir().display()
+        ))
+    })?;
+
     let override_path = key.override_path();
-    let override_text = epic::override_yaml(&key, &manifest, &published);
+    let override_text = epic::override_yaml(&key, &manifest, &published, &envelope);
     state::write_private(&override_path, &override_text).map_err(|error| {
         Failure::run(format!(
             "cannot write the override {}: {error}",
@@ -220,9 +307,11 @@ fn up(options: &Options) -> Result<(), Failure> {
     })?;
 
     let wait = WAIT_SECS.to_string();
+    let compose_env = env::published_vars(&key, &published);
     let started = compose(
         &state_key,
         Some((&root, &manifest_path, &override_path)),
+        &compose_env,
         &["up", "-d", "--wait", "--wait-timeout", &wait],
     );
     if !started.ok {
@@ -264,6 +353,16 @@ fn up(options: &Options) -> Result<(), Failure> {
             key.container(&port.role)
         );
     }
+    for (role, names) in envelope.role_env_names() {
+        println!("  env {role:<9} {}", names.join(" "));
+    }
+    for (role, names) in envelope.role_secret_names() {
+        println!(
+            "  secret {role:<6} {} (read-only at {}/)",
+            names.join(" "),
+            env::SECRET_MOUNT
+        );
+    }
     Ok(())
 }
 
@@ -276,7 +375,7 @@ fn down(options: &Options) -> Result<(), Failure> {
     let allocator = Allocator::default_path();
     let mut failures = Vec::new();
     for (key, _) in &selected {
-        let stopped = compose(key, None, &["stop"]);
+        let stopped = compose(key, None, &[], &["stop"]);
         if !stopped.ok {
             failures.push(format!("{key}: {}", one_line(&stopped.text())));
             continue;
@@ -309,7 +408,7 @@ fn rm(options: &Options) -> Result<(), Failure> {
     let allocator = Allocator::default_path();
     let mut failures = Vec::new();
     for (key, entry) in &selected {
-        let removed = compose(key, None, &["down", "-v", "--remove-orphans"]);
+        let removed = compose(key, None, &[], &["down", "-v", "--remove-orphans"]);
         if !removed.ok {
             failures.push(format!("{key}: {}", one_line(&removed.text())));
             continue;
@@ -378,7 +477,7 @@ fn gc(options: &Options) -> Result<(), Failure> {
             println!("would remove {key} ({block}) idle {since}");
             continue;
         }
-        let removed = compose(key, None, &["down", "-v", "--remove-orphans"]);
+        let removed = compose(key, None, &[], &["down", "-v", "--remove-orphans"]);
         if !removed.ok {
             failures.push(format!("{key}: {}", one_line(&removed.text())));
             continue;
@@ -520,9 +619,16 @@ fn resolve_epic(explicit: Option<&str>) -> Result<String, Failure> {
 }
 
 /// Run `docker compose` for one project. `files` adds the manifest and the
-/// generated override; `down`, `stop` and `ps` work from the project name alone,
-/// so they also work after the checkout is gone.
-fn compose(key: &str, files: Option<(&Path, &Path, &Path)>, args: &[&str]) -> driver::Output {
+/// generated override; `envs` is the `MSBX_<ROLE>_HOST`/`_PORT` set a project's
+/// Compose file may interpolate, never a store value. `down`, `stop` and `ps`
+/// work from the project name alone, so they also work after the checkout is
+/// gone.
+fn compose(
+    key: &str,
+    files: Option<(&Path, &Path, &Path)>,
+    envs: &[(String, String)],
+    args: &[&str],
+) -> driver::Output {
     let mut all = vec![
         "compose".to_string(),
         "--ansi".to_string(),
@@ -539,7 +645,7 @@ fn compose(key: &str, files: Option<(&Path, &Path, &Path)>, args: &[&str]) -> dr
         all.push(generated.to_string_lossy().to_string());
     }
     all.extend(args.iter().map(|arg| arg.to_string()));
-    driver::run_owned("docker", &all)
+    driver::run_owned_env("docker", &all, envs)
 }
 
 #[derive(Debug, Deserialize)]
@@ -771,7 +877,7 @@ fn recorded_ports(role: &str, entry: &Entry, names: Option<&Key>) -> Vec<PortSta
 }
 
 fn ps_containers(key: &str) -> Result<Vec<PsContainer>, Failure> {
-    let out = compose(key, None, &["ps", "--all", "--format", "json"]);
+    let out = compose(key, None, &[], &["ps", "--all", "--format", "json"]);
     if !out.ok {
         return Err(Failure::run(format!(
             "docker compose ps failed for {key}: {}",
