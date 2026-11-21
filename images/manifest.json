@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "base": "debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc",
+  "node": {
+    "image": "node:26.12.0-bookworm-slim@sha256:742a0fe7320e09e0321222b68165e6ac731d30470e7ea7f98f9bfc3a6e1034fe",
+    "version": "26.12.0"
+  },
+  "pnpm": "12.21.0",
+  "rust": {
+    "image": "rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c",
+    "version": "1.99.1"
+  },
+  "go": {
+    "image": "golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea",
+    "version": "1.27.4"
+  },
+  "python": "3.11.2",
+  "packages": {
+    "ca-certificates": "20250419~deb12u2",
+    "git": "1:2.39.5-0+deb12u3",
+    "gh": "2.23.0+dfsg1-1",
+    "jq": "1.6-2.1+deb12u3",
+    "ripgrep": "13.0.0-4+b2",
+    "procps": "2:4.0.2-3",
+    "socat": "1.7.4.4-2",
+    "build-essential": "12.9",
+    "python3": "3.11.2-1+b1",
+    "libstdc++6": "12.2.0-14+deb12u1",
+    "curl": "7.88.1-10+deb12u15"
+  },
+  "pi": {
+    "package": "@earendil-works/pi-coding-agent",
+    "version": "1.6.0",
+    "urls": {
+      "amd64": {
+        "url": "https://github.com/earendil-works/pi/releases/download/v1.6.0/pi-linux-x64.tar.gz",
+        "sha256": "ef77dbe4379b3bdeb425a1e1b862fa3c915c255000dfe4965c98eee96a5765d1"
+      },
+      "arm64": {
+        "url": "https://github.com/earendil-works/pi/releases/download/v1.6.0/pi-linux-arm64.tar.gz",
+        "sha256": "5404547b9739be596d50ae7142c52535899e8e7dd37a7bace9be593e0355b468"
+      }
+    },
+    "packages": [
+      {
+        "name": "pi-subagents",
+        "version": "0.89.2",
+        "url": "https://registry.npmjs.org/pi-subagents/-/pi-subagents-0.89.2.tgz",
+        "sha256": "a7209b7b6f6ea3b121f12e9370a797b64a8a12fd316bb3e735f63718f4017a41"
+      }
+    ]
+  },
+  "multica": {
+    "version": "0.11.0",
+    "urls": {
+      "amd64": {
+        "url": "https://github.com/multica-ai/multica/releases/download/v0.11.0/multica-cli-0.11.0-linux-amd64.tar.gz",
+        "sha256": "0d5150c8257d814c29b82e091d2da393deb5fc0306d8c391fda66c557e0993ea"
+      },
+      "arm64": {
+        "url": "https://github.com/multica-ai/multica/releases/download/v0.11.0/multica-cli-0.11.0-linux-arm64.tar.gz",
+        "sha256": "924b34eeee4a1680c4e72853b45de1ce6a33f3a84d5c98a8963d8ccaa398feb1"
+      }
+    }
+  }
+}

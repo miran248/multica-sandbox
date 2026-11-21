@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use multica_sandbox::{dns, doctor, init, lifecycle};
+use multica_sandbox::{dns, doctor, image, init, lifecycle};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -18,6 +18,7 @@ Usage:
   msbx env ls|export [--scope S] [--project P]   Names, or the host-context exports
   msbx doctor                                    Diagnose the Docker host; changes nothing
   msbx init [--check] [--keep]                   Set up the host, then run the driver checks
+  msbx image build|pin|show                      Build, pin and print the harness image
   msbx dns [--listen ADDR]                       Serve the msbx.test resolver
   msbx --version
   msbx --help
@@ -66,6 +67,7 @@ fn main() -> ExitCode {
         Some("env") => lifecycle::run_env(&args[1..]),
         Some("doctor") => doctor::run(),
         Some("init") => init::run(&args[1..]),
+        Some("image") => image::run_command(&args[1..]),
         Some("dns") => run_dns(&args[1..]),
         Some(other) => {
             eprintln!("msbx: unknown command `{other}`");

@@ -29,7 +29,10 @@ checkout.
 - **Harness** is not manifest-driven. It carries the model credential,
   `GH_TOKEN` and the git identity, wins over both other layers in the harness
   context, and never enters a service envelope. It is how the container gets
-  credentials without `~/.config`, `~/.ssh` or `~/.gitconfig`.
+  credentials without `~/.config`, `~/.ssh` or `~/.gitconfig`. The image's Pi
+  reads `DEEPSEEK_API_KEY` from it through the environment, and the entrypoint
+  runs `gh auth setup-git` when `GH_TOKEN` is present. The image carries no
+  credential and no model id of its own.
 - `env` is one `NAME=value` per line. Blank lines and lines whose first
   non-blank character is `#` are skipped; the value is everything after the
   first `=`, verbatim. A malformed line, a duplicate name or a name that is not

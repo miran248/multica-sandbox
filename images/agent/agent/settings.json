@@ -1,0 +1,10 @@
+{
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
+  "defaultProjectTrust": "always",
+  "defaultThinkingLevel": "medium",
+  "enableInstallTelemetry": false,
+  "quietStartup": true,
+  "packages": [
+    "/opt/msbx/pi-packages/node_modules/pi-subagents"
+  ]
+}
