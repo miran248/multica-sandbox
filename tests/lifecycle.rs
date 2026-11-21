@@ -182,7 +182,7 @@ impl Fixture {
         let dir = self.root.join("multica");
         fs::create_dir_all(&dir).unwrap();
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = issue ] && [ \"$2\" = get ]; then\n  if [ -f '{}/offline' ]; then echo 'multica: offline: connection refused' >&2; exit 7; fi\n  if [ -f '{}/fail' ]; then echo 'The requested resource was not found.' >&2; exit 4; fi\n  if [ -f \"{}/$3.json\" ]; then cat \"{}/$3.json\"; exit 0; fi\n  printf '%s\\n' '{{\"identifier\":\"MIR-42\",\"status_category\":\"in_progress\",\"archived_at\":null}}'\n  exit 0\nfi\necho \"multica: cannot resolve $*\" >&2\nexit 1\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = issue ] && [ \"$2\" = get ]; then\n  if [ -f '{}/offline' ]; then echo 'multica: workspace not found in config (offline)' >&2; exit 7; fi\n  if [ -f '{}/fail' ]; then echo 'The requested resource was not found.' >&2; exit 4; fi\n  if [ -f \"{}/$3.json\" ]; then cat \"{}/$3.json\"; exit 0; fi\n  printf '%s\\n' '{{\"identifier\":\"MIR-42\",\"status_category\":\"in_progress\",\"archived_at\":null}}'\n  exit 0\nfi\necho \"multica: cannot resolve $*\" >&2\nexit 1\n",
             self.root.join("multica.log").display(),
             dir.display(),
             dir.display(),
@@ -987,6 +987,8 @@ fn up_refuses_an_ancestor_or_unresolvable_bind() {
         ("$PWD/..:/work", "ancestor"),
         ("${HOME}:/work", "ancestor"),
         ("${DATA_DIR}/x:/work", "cannot resolve"),
+        ("$PWDX:/work", "cannot resolve"),
+        ("$HOME_DIR:/work", "cannot resolve"),
     ] {
         fixture.write_manifest(&format!(
             "x-msbx:\n  project: signals\nservices:\n  client:\n    image: alpine:3.20\n    volumes:\n      - {source}\n"

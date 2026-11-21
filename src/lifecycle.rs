@@ -596,13 +596,10 @@ fn finality(scope: &str) -> Result<Finality, Failure> {
 }
 
 /// The not-found answer is the only failure that means "the issue is gone".
-/// The CLI exits 4 and says so; older builds only carry the text.
+/// The CLI exits 4 for it; the text is not consulted, because a configuration or
+/// auth error can also say "not found" and must not destroy a box.
 fn is_not_found(output: &std::process::Output) -> bool {
-    if output.status.code() == Some(4) {
-        return true;
-    }
-    let text = output_text(output).to_ascii_lowercase();
-    text.contains("not found") || text.contains("404") || text.contains("no issue")
+    output.status.code() == Some(4)
 }
 
 fn output_text(output: &std::process::Output) -> String {

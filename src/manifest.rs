@@ -376,22 +376,70 @@ fn parse_volume_sources(role: &str, volumes: &Value) -> Result<Vec<String>, Mani
 }
 
 /// Expand the interpolation this check can decide: `$PWD`/`${PWD}` is the
-/// checkout root and `$HOME`/`${HOME}` is the host home. Anything else is
-/// refused, because a path this check cannot resolve might be the checkout.
-fn expand_vars(source: &str, root: &Path, home: &Path) -> Result<String, &'static str> {
+/// checkout root and `$HOME`/`${HOME}` is the host home. Every other variable
+/// is refused by name, because a path this check cannot resolve might be the
+/// checkout. The tokens are parsed, not substring-replaced: `$PWDX` is the
+/// variable `PWDX`, not `$PWD` plus `X`, and Compose would expand it too.
+fn expand_vars(source: &str, root: &Path, home: &Path) -> Result<String, String> {
     let root = root.to_string_lossy();
     let home = home.to_string_lossy();
-    let expanded = source
-        .replace("${PWD}", &root)
-        .replace("$PWD", &root)
-        .replace("${HOME}", &home)
-        .replace("$HOME", &home);
-    if expanded.contains('$') {
-        return Err(
-            "uses interpolation this check cannot resolve (`$PWD`/`${PWD}` and `$HOME`/`${HOME}` only)",
-        );
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(index) = rest.find('$') {
+        out.push_str(&rest[..index]);
+        let after = &rest[index + 1..];
+        let (name, consumed) = if let Some(braced) = after.strip_prefix('{') {
+            let Some(end) = braced.find('}') else {
+                return Err(
+                    "has a `{` with no `}`, which this check cannot resolve (`$PWD`/`${PWD}` and `$HOME`/`${HOME}` only)"
+                        .to_string(),
+                );
+            };
+            let name = &braced[..end];
+            if !valid_var_name(name) {
+                return Err(format!(
+                    "uses the variable `${{{name}}}`, which this check cannot resolve (`$PWD`/`${{PWD}}` and `$HOME`/`${{HOME}}` only)"
+                ));
+            }
+            (name, end + 3)
+        } else {
+            let len = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .count();
+            if len == 0 {
+                return Err(
+                    "has a `$` that does not start a variable (`$PWD`/`${PWD}` and `$HOME`/`${HOME}` only)"
+                        .to_string(),
+                );
+            }
+            let name = &after[..len];
+            if !valid_var_name(name) {
+                return Err(format!(
+                    "uses the variable `${name}`, which this check cannot resolve (`$PWD`/`${{PWD}}` and `$HOME`/`${{HOME}}` only)"
+                ));
+            }
+            (name, len + 1)
+        };
+        match name {
+            "PWD" => out.push_str(&root),
+            "HOME" => out.push_str(&home),
+            other => {
+                return Err(format!(
+                    "uses the variable `${other}`, which this check cannot resolve (`$PWD`/`${{PWD}}` and `$HOME`/`${{HOME}}` only)"
+                ))
+            }
+        }
+        rest = &rest[index + consumed..];
     }
-    Ok(expanded)
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn valid_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// A source is a path when Compose would treat it as one: an absolute path, or
@@ -895,8 +943,12 @@ services:
         let root = Path::new("/home/me/signals");
         for (source, expected) in [
             ("../:/work", "ancestor"),
+            ("${PWD}:/work", "ancestor"),
             ("$PWD/..:/work", "ancestor"),
             ("${DATA_DIR}/x:/work", "cannot resolve"),
+            ("$HOME_DIR:/work", "cannot resolve"),
+            ("$PWDX:/work", "cannot resolve"),
+            ("${PWD:-.}:/work", "cannot resolve"),
         ] {
             let text = format!(
                 "x-msbx:\n  project: signals\nservices:\n  web:\n    image: alpine\n    volumes:\n      - {source}\n"
