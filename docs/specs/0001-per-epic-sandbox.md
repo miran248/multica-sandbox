@@ -89,7 +89,9 @@ Rules:
 
 - Name: `<role>.<epic>.<project>.msbx.test`. It resolves to `127.0.0.1` on the
   host and is a network alias inside the epic's Compose network, so the same
-  string works from both sides.
+  string works from both sides. Inside a container the network alias wins over
+  the host resolver's `127.0.0.1`, so a peer reaches the local role and never
+  the container itself.
 - Container: `<project>-<epic>-<role>`; Compose project `<project>-<epic>`.
   Epic keys are lowercased (`MIR-178` → `mir-178`).
 - Host port: the first `up` allocates the epic a block of 16 consecutive
@@ -203,8 +205,9 @@ the role is local or remote, and nothing is published on the host.
   - C3 reachability — TCP connect from the host to both assigned ports.
   - C4 names — both dotted names resolve to `127.0.0.1` through the resolver.
   - C5 in-epic — a client reaches `pg` by service name and by dotted alias.
-  - C6 isolation — epic one cannot resolve epic two's name from inside; the
-    observed error is recorded.
+  - C6 isolation — a peer in epic one cannot reach epic two's service.
+    Resolution may land on `127.0.0.1` through the host resolver; the check
+    records the address and the failed connection, not a resolution error.
   - C7 env — an env value and a secret file are visible inside, and the secret
     is absent from the checkout.
 - End-to-end on this host: two epics run the same stack; the wrapper starts a
