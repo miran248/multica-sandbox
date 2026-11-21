@@ -59,13 +59,30 @@ impl Via {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestError {
     message: String,
+    no_manifest: bool,
 }
 
 impl ManifestError {
     fn new(message: impl Into<String>) -> Self {
         ManifestError {
             message: message.into(),
+            no_manifest: false,
         }
+    }
+
+    /// A Compose file that carries no `x-msbx` block. The file is a normal
+    /// Compose file, not a sandbox manifest, so callers pass it through.
+    fn no_manifest(message: impl Into<String>) -> Self {
+        ManifestError {
+            message: message.into(),
+            no_manifest: true,
+        }
+    }
+
+    /// Whether the error means "this is not a sandbox manifest" rather than a
+    /// broken one.
+    pub fn is_missing_manifest(&self) -> bool {
+        self.no_manifest
     }
 }
 
@@ -93,8 +110,14 @@ impl Manifest {
         let text = std::fs::read_to_string(path).map_err(|error| {
             ManifestError::new(format!("cannot read {}: {error}", path.display()))
         })?;
-        Self::parse(&text)
-            .map_err(|error| ManifestError::new(format!("{}: {error}", path.display())))
+        Self::parse(&text).map_err(|error| {
+            let message = format!("{}: {error}", path.display());
+            if error.is_missing_manifest() {
+                ManifestError::no_manifest(message)
+            } else {
+                ManifestError::new(message)
+            }
+        })
     }
 
     /// Validate a manifest document.
@@ -107,9 +130,9 @@ impl Manifest {
 
         let services = parse_services(root)?;
 
-        let block = root
-            .get("x-msbx")
-            .ok_or_else(|| ManifestError::new("not a sandbox manifest: `x-msbx` is missing"))?;
+        let block = root.get("x-msbx").ok_or_else(|| {
+            ManifestError::no_manifest("not a sandbox manifest: `x-msbx` is missing")
+        })?;
         let block = block
             .as_mapping()
             .ok_or_else(|| ManifestError::new("`x-msbx` must be a mapping"))?;

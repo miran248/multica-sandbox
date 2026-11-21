@@ -877,8 +877,10 @@ fn one_line(text: &str) -> String {
         .join(" / ");
     if joined.is_empty() {
         "no output".to_string()
-    } else if joined.len() > 240 {
-        format!("{}…", &joined[..240])
+    } else if joined.chars().count() > 240 {
+        let mut truncated: String = joined.chars().take(240).collect();
+        truncated.push('…');
+        truncated
     } else {
         joined
     }

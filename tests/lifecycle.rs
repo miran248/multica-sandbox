@@ -554,6 +554,21 @@ fn down_keeps_state_and_rm_requires_yes_and_frees_the_block() {
 }
 
 #[test]
+fn rm_without_an_epic_refuses_to_destroy_every_box() {
+    let fixture = Fixture::new("rm-all");
+    assert_ok(&fixture.up(&["up", "--epic", "mir-42"]));
+    assert_ok(&fixture.up(&["up", "--epic", "mir-43"]));
+    assert_eq!(fixture.state()["blocks"].as_object().unwrap().len(), 2);
+
+    fixture.clear_log();
+    let refused = fixture.up(&["rm", "--yes"]);
+    assert_eq!(refused.status.code(), Some(64), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("--epic"), "{}", stderr(&refused));
+    assert!(!fixture.log().contains("down -v"), "{}", fixture.log());
+    assert_eq!(fixture.state()["blocks"].as_object().unwrap().len(), 2);
+}
+
+#[test]
 fn gc_lists_idle_boxes_dry_and_then_sweeps_them() {
     let fixture = Fixture::new("gc");
     assert_ok(&fixture.up(&["up", "--epic", "mir-42"]));

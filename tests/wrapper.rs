@@ -296,6 +296,21 @@ fn passes_a_checkout_without_a_manifest_through_untouched() {
 }
 
 #[test]
+fn passes_a_compose_file_without_x_msbx_through_untouched() {
+    let fixture =
+        Fixture::new("not-a-manifest").with_manifest("services:\n  pg:\n    image: postgres:17\n");
+    let output = fixture.run(&["model", "run"], &[]);
+    assert_ok(&output);
+    assert_eq!(fixture.docker_log(), "");
+    assert_eq!(fixture.multica_log(), "");
+    assert!(
+        stdout(&output).contains("ARGS model run"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
 fn starts_the_box_and_exports_the_envelope_before_the_harness() {
     let fixture = Fixture::new("export").with_manifest(ENV_MANIFEST);
     fixture.write_store_env(&format!("DATABASE_URL={DATABASE_URL}\n"));

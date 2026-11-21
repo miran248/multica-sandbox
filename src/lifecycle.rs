@@ -415,6 +415,12 @@ fn rm(options: &Options) -> Result<(), Failure> {
         println!("no box to remove");
         return Ok(());
     }
+    if options.epic.is_none() && selected.len() > 1 {
+        return Err(Failure::Usage(format!(
+            "refusing to remove {} boxes without --epic; name the box to destroy",
+            selected.len()
+        )));
+    }
     if !options.yes && !confirm(&selected)? {
         println!("cancelled");
         return Ok(());

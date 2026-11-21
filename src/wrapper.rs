@@ -5,7 +5,8 @@
 //! harness envelope and then hands the process to the real harness with the
 //! original arguments and stdin.
 //!
-//! - A checkout without `.multica/compose.yaml` is passed through untouched.
+//! - A checkout without a sandbox manifest (no `.multica/compose.yaml`, or a
+//!   Compose file without `x-msbx`) is passed through untouched.
 //! - `--probe` and `--list-models` are harness launches, not task launches:
 //!   they never resolve an epic, start a box or touch Docker.
 //! - The epic is `MSBX_EPIC`, else the task's issue — from the checkout branch
@@ -86,7 +87,8 @@ pub fn run(args: &[OsString]) -> ExitCode {
     }
 
     match sandbox() {
-        Ok(exports) => exec_harness(&harness, args, &exports),
+        Ok(Some(exports)) => exec_harness(&harness, args, &exports),
+        Ok(None) => exec_harness(&harness, args, &[]),
         Err(error) if soft() => {
             eprintln!("{NAME}: {error}");
             eprintln!("{NAME}: MSBX_RUN_SOFT=1: launching the harness without the sandbox");
@@ -146,11 +148,17 @@ fn find_on_path(program: &OsStr) -> Option<PathBuf> {
 }
 
 /// Resolve the project and the epic, start the box, and return the harness
-/// envelope the last `up` rendered.
-fn sandbox() -> Result<Vec<(String, String)>, Failure> {
+/// envelope the last `up` rendered. `None` means the checkout's Compose file
+/// has no `x-msbx` block: it is not a sandbox manifest and the launch passes
+/// through.
+fn sandbox() -> Result<Option<Vec<(String, String)>>, Failure> {
     let root = process_env::current_dir()
         .map_err(|error| Failure::new(format!("cannot read the checkout directory: {error}")))?;
-    let manifest = Manifest::from_repo(&root).map_err(|error| Failure::new(error.to_string()))?;
+    let manifest = match Manifest::from_repo(&root) {
+        Ok(manifest) => manifest,
+        Err(error) if error.is_missing_manifest() => return Ok(None),
+        Err(error) => return Err(Failure::new(error.to_string())),
+    };
     let epic = resolve_epic(&root)?;
     let msbx = msbx_bin();
 
@@ -191,11 +199,12 @@ fn sandbox() -> Result<Vec<(String, String)>, Failure> {
         )));
     }
     let stdout = String::from_utf8_lossy(&exported.stdout);
-    env::parse_exports(&stdout).map_err(|error| {
+    let exports = env::parse_exports(&stdout).map_err(|error| {
         Failure::new(format!(
             "`msbx env export` printed an envelope this wrapper cannot read: {error}"
         ))
-    })
+    })?;
+    Ok(Some(exports))
 }
 
 /// Run `msbx` with a closed stdin, so the prompt the harness will read stays

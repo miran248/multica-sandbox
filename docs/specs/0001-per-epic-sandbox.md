@@ -1,6 +1,7 @@
 # 0001 — Per-epic sandbox on Docker Compose
 
-Status: proposed. Approved when its pull request merges into `spec/mir-178`.
+Status: approved. Merged into `spec/mir-178` by
+[PR #2](https://github.com/miran248/multica-sandbox/pull/2).
 Epic: [MIR-178](https://multica.ai/miran248/issues/MIR-178). Supersedes the
 Apple `container` substrate of the first revision of
 [ADR 0001](../adr/0001-per-epic-sandbox.md).
@@ -150,7 +151,8 @@ The store is outside every checkout:
   record state. Idempotent; a changed `publish` set reallocates and says so.
 - `down` — `docker compose stop`; containers, networks and volumes stay.
 - `rm` — `docker compose down -v`; the state entry is removed and the block
-  freed.
+  freed. It names one box: an unqualified request that would destroy several is
+  refused rather than sweeping them.
 - `status` — per epic: services, health, host ports, last use; `--json` for
   scripts.
 - `gc` — remove epics idle for 14 days and release stale blocks; `--dry-run`

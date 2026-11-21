@@ -32,7 +32,7 @@ Terms this repository uses in one specific sense.
   aliases, loopback ports, env files and tunnel sidecars. Regenerated on every
   `up`; the only place those decisions live.
 - **Driver** — the backend that creates and addresses containers. Docker
-  Compose is the v1 target; the trait exists so the decision stays reversible.
+  Compose is the v1 driver; no other driver is implemented.
 - **Init** — `msbx init`: the idempotent first-run setup on a fresh host. It
   installs the `msbx.test` resolver and the `msbx dns` unit, then runs the
   C1–C7 checks ([MIR-178]). `--check` measures without changing the host.

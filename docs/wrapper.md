@@ -20,8 +20,8 @@ profile command  →  msbx-run  →  msbx up  →  msbx env export  →  exec ds
 2. **Probe launches** — an argument equal to `--probe` or `--list-models` is a
    harness question, not a task. The wrapper resolves no epic, starts no box and
    never calls Docker; it execs the harness immediately.
-3. **No manifest** — a checkout without `.multica/compose.yaml` is passed
-   through untouched.
+3. **No manifest** — a checkout with no `.multica/compose.yaml`, or a Compose
+   file without an `x-msbx` block, is passed through untouched.
 4. **Manifest checkout** — the wrapper resolves the epic, reads
    `x-msbx.project` from the manifest, runs `msbx up --epic E --project P` and
    then `msbx env export --epic E --project P`. The exported names are added to
