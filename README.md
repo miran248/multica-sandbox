@@ -22,13 +22,14 @@ Compose network.
 
 ## Status
 
-**Stage 2 on `spec/mir-270`.** The contract is
+**Stage 3 on `spec/mir-270`.** The contract is
 [docs/specs/0002-container-harness.md](docs/specs/0002-container-harness.md);
 the decision record is [ADR 0002](docs/adr/0002-container-harness.md). The box is
-keyed by scope and is state only: the value layers, the state-only refusals and
-the lifecycle sweep ([MIR-272](https://multica.ai/miran248/issues/MIR-272)) are
-delivered. `msbx-run` is still a host wrapper; the per-run Pi container and the
-pinned image are stages 3 and 4, and the release promotes the branch into
+keyed by scope and is state only ([MIR-272](https://multica.ai/miran248/issues/MIR-272)),
+and `msbx-run` is now the container shim: four identical-path mounts, a lease,
+the scope network, the agent dir, the pinned digest, discovery from the pin and
+C8 ([MIR-273](https://multica.ai/miran248/issues/MIR-273)). The image is stage 4,
+verified here against a fixture pin; the release promotes the branch into
 `main`.
 
 ## What it will manage
@@ -64,13 +65,17 @@ pinned image are stages 3 and 4, and the release promotes the branch into
 2. The shim resolves the scope: `--scope`/`MSBX_SCOPE`, the daemon task context
    (`issue_id` → the ticket key, `chat_session_id` → `chat-<8>`), or the
    worktree branch. There is no parent lookup and no silent default.
-3. It takes a lease, runs `msbx up` for the scope's box, renders the harness
-   envelope and seeds the agent dir if this is the agent's first run.
-4. It runs Pi in one container with stdin, stdout and stderr attached, the
-   scope's Compose network, a loopback forwarder to the daemon port, the
-   in-image CLI and `gh auth setup-git` when a token is present.
-5. When the container exits it releases the lease. The last lease to leave
-   stops the box; the volumes, envelope and port block stay.
+3. It seeds the agent dir on the agent's first run, takes a lease, runs
+   `msbx up --lease` for the scope's box and passes the rendered
+   `env/harness.env` file.
+4. It runs Pi in one container with stdin, stdout and stderr attached, exactly
+   four mounts, the host UID/GID, the scope's Compose network, a loopback
+   forwarder to the daemon port, the in-image CLI and `gh auth setup-git` when a
+   token is present.
+5. When the container exits it propagates the status and releases the lease.
+   The last lease to leave stops a lease-managed box; the volumes, envelope and
+   port block stay. A killed shim's container and lease are swept by the next
+   `up` or `gc`.
 
 `--version`, `--probe`, `--list-models` and the Pi RPC discovery args never
 start a box: `--version` answers from the pin, the others run in a throwaway
@@ -85,12 +90,15 @@ LaunchAgent `test.msbx.dns` running `msbx dns`. On Linux it installs
 process cannot prompt for `sudo`, `init` prints the one privileged command it
 needs and fails C1 with it.
 
-It then runs C1–C7 against two synthetic scopes: both run Postgres on `5432` on
+It then runs C1–C8 against two synthetic scopes: both run Postgres on `5432` on
 distinct loopback ports, the host reaches both, the dotted names answer
 `127.0.0.1`, a peer reaches `pg` by service name and alias, the scopes cannot
 reach each other, and an env value and a secret file are visible without the
-secret entering the checkout. Any `FAIL` exits 1, any `SKIP` exits 2.
-`--check` installs nothing. C8, the harness-container check, lands with stage 3.
+secret entering the checkout. C8 runs a container from the pinned image with
+the four mounts, checks the host UID/GID on a bind-mounted write and inside the
+container, the in-image CLI, the published alias and the agent-dir seed; it
+records a skip until stage 4 pins the image. Any `FAIL` exits 1, any `SKIP`
+exits 2. `--check` installs nothing.
 
 ## State and ports
 
@@ -115,7 +123,7 @@ must agree with the manifest. The checkout must be under `$HOME`, and
 `~/projects` is refused.
 
 ```sh
-msbx up --scope mir-42 [--file .multica/compose.yaml]
+msbx up --scope mir-42 [--lease <task>] [--file .multica/compose.yaml]
 msbx status [--scope mir-42] [--json]
 msbx down --scope mir-42
 msbx rm --scope mir-42 --yes
@@ -140,7 +148,8 @@ both act on the Compose project name alone. `status` shows each box's services,
 health and ports (`--json` for scripts), marking a tunnelled role as
 `tunnel:<via>`. `gc --dry-run` lists what it would remove: a ticket whose issue
 is done, cancelled, archived or gone; a chat box idle for 2 days; a ticket box
-idle for 14 days. Stage 3 adds stale-lease and orphan-container sweeps.
+idle for 14 days, and sweeps stale leases and harness containers whose lease is
+stale or gone. `up` makes the same stale-lease and own-scope orphan sweep.
 
 ## Environment and credentials
 
@@ -185,7 +194,7 @@ msbx status [--scope S] [--json]               # services and ports
 msbx env ls|export [--scope S]                 # names, or exports for a host shell
 msbx gc [--dry-run]                            # final-state and idle sweep
 msbx doctor                                    # describe the Docker host and the pin
-msbx init [--check] [--keep]                   # install the resolver, run C1-C7
+msbx init [--check] [--keep]                   # install the resolver, run C1-C8
 msbx image build|pin|show                      # the harness image
 msbx dns [--listen ADDR]                       # the msbx.test resolver (127.0.0.1:5335)
 msbx-run [harness args...]                     # the container shim
@@ -217,8 +226,9 @@ msbx image build && msbx image pin
 ```
 
 `msbx init` is idempotent and needs Docker running; the resolver install is the
-one `sudo` prompt. A lifecycle run needs the `msbx dns` unit installed (or a
-`msbx dns` started for the session) for the dotted names to resolve on the
-host; the harness container joins the scope network instead. Install both
-binaries with `cargo install --path .` before pointing a runtime profile at
-`msbx-run`.
+one `sudo` prompt. C8 needs the pinned harness image and records a skip until
+`msbx image build && msbx image pin` has run. A lifecycle run needs the
+`msbx dns` unit installed (or a `msbx dns` started for the session) for the
+dotted names to resolve on the host; the harness container joins the scope
+network instead. Install both binaries with `cargo install --path .` before
+pointing a runtime profile at `msbx-run`.

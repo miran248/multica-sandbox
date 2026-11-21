@@ -12,8 +12,9 @@
   it supersedes is [specs/0001-per-epic-sandbox.md](specs/0001-per-epic-sandbox.md).
 - Env and secrets: [env.md](env.md) — the three value layers, the render
   pipeline, the harness envelope and its stated limits.
-- Harness wrapper: [wrapper.md](wrapper.md) — `msbx-run`, scope resolution, the
-  container shim, probe pass-through, profile wiring and rollback.
+- Harness container shim: [wrapper.md](wrapper.md) — `msbx-run`, scope and
+  project resolution, the four mounts, leases and sweeps, discovery from the
+  pin, profile wiring and rollback.
 - Remote services: [tunnels.md](tunnels.md) — the `x-msbx.tunnels` sidecar, the
   `ssh` and `cloudflared` transports, their credentials and stated limits.
 

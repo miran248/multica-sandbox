@@ -179,6 +179,7 @@ impl Allocator {
                         dir: None,
                         published: Vec::new(),
                         tunnels: Vec::new(),
+                        lease_managed: false,
                     },
                 );
                 self.store.save(&state)?;
@@ -254,6 +255,7 @@ impl Allocator {
         entry.dir = Some(meta.dir.to_string_lossy().to_string());
         entry.published = meta.published.clone();
         entry.tunnels = meta.tunnels.clone();
+        entry.lease_managed = meta.lease_managed;
         entry.last_used = at;
         self.store.save(&state)?;
         Ok(())
@@ -303,6 +305,8 @@ pub struct ScopeMeta {
     pub dir: PathBuf,
     pub published: Vec<PublishedPort>,
     pub tunnels: Vec<TunnelRecord>,
+    /// `up --lease` started this box; a manual `up` leaves it false.
+    pub lease_managed: bool,
 }
 
 fn idle_entries(state: &State, idle: u64, at: u64) -> Vec<(String, Block)> {
@@ -455,12 +459,14 @@ mod tests {
                 via: "ssh".to_string(),
                 upstream: "db.example.com:5432".to_string(),
             }],
+            lease_managed: true,
         };
         allocator.record("mir-901", &meta, 20).unwrap();
         let entry = allocator.entry("mir-901").unwrap().unwrap();
         assert_eq!(entry.project.as_deref(), Some("demo"));
         assert_eq!(entry.scope.as_deref(), Some("mir-901"));
         assert_eq!(entry.published[0].port, block.start);
+        assert!(entry.lease_managed);
         assert_eq!(entry.last_used, 20);
 
         assert!(allocator.touch("mir-901", 30).unwrap());

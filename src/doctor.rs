@@ -1,15 +1,19 @@
 //! `msbx doctor` — describe a Docker host without changing it.
 //!
 //! Reports the Engine and Compose versions, daemon reachability, the
-//! `msbx.test` resolver file and whether `msbx dns` answers, and any leftovers
-//! from the dnsmasq era (`hours.test` / `signals.test`, a stray resolver file,
-//! a running dnsmasq). Docker problems are failures; host setup that `init`
-//! repairs is a warning.
+//! `msbx.test` resolver file and whether `msbx dns` answers, the harness image
+//! pin, the recorded boxes with their live leases, stale leases and orphan
+//! harness containers, and any leftovers from the dnsmasq era (`hours.test` /
+//! `signals.test`, a stray resolver file, a running dnsmasq). Docker problems
+//! are failures; host setup that `init` repairs is a warning.
 
 use crate::dns;
 use crate::driver;
+use crate::image::Pin;
+use crate::lease;
 use crate::platform;
 use crate::ports::{Allocator, Block};
+use crate::state;
 use std::process::ExitCode;
 
 const ZONE: &str = platform::ZONE;
@@ -140,6 +144,41 @@ pub fn run() -> ExitCode {
         }
         Err(error) => {
             println!("[warn] cannot read the box state: {error}");
+            warnings += 1;
+        }
+    }
+
+    match Pin::load() {
+        Ok(pin) => println!(
+            "[ok]   harness image pinned ({}@{}), Pi {}",
+            pin.image, pin.digest, pin.pi
+        ),
+        Err(error) => {
+            println!("[warn] {error}");
+            warnings += 1;
+        }
+    }
+
+    let stale = lease::stale_all(state::now()).len();
+    if stale > 0 {
+        println!("[warn] {stale} stale lease(s); run `msbx gc`");
+        warnings += 1;
+    } else {
+        println!("[ok]   no stale leases");
+    }
+
+    match lease::sweep_containers(None, true) {
+        Ok(orphans) if orphans.is_empty() => println!("[ok]   no orphan harness containers"),
+        Ok(orphans) => {
+            println!(
+                "[warn] {} orphan harness container(s); run `msbx gc`: {}",
+                orphans.len(),
+                orphans.join(", ")
+            );
+            warnings += 1;
+        }
+        Err(error) => {
+            println!("[warn] cannot list harness containers: {error}");
             warnings += 1;
         }
     }

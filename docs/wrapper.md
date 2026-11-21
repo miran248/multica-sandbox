@@ -1,87 +1,124 @@
-# The harness wrapper
+# The harness container shim
 
-Status: re-keyed to the scope by
-[MIR-272](https://multica.ai/miran248/issues/MIR-272), stage 2 of
-[MIR-270](https://multica.ai/miran248/issues/MIR-270); originally delivered by
-[MIR-261](https://multica.ai/miran248/issues/MIR-261). The wrapper still runs
-the harness on the host in this stage. Stage 3 turns it into the container shim:
-it will run Pi in the pinned image with the task mounts instead of exec'ing a
-host harness.
+Status: delivered by [MIR-273](https://multica.ai/miran248/issues/MIR-273),
+stage 3 of [MIR-270](https://multica.ai/miran248/issues/MIR-270). The wrapper
+from [MIR-261](https://multica.ai/miran248/issues/MIR-261) now runs Pi in a
+per-run container. The image is stage 4; this stage is verified against a
+fixture pin, and the shim names whatever digest the pin records.
 
 `msbx-run` is the command the Multica runtime profile launches instead of the
-harness. It decides which scope the task is about, starts that scope's box,
-exports the host context and then replaces itself with the real harness, keeping
-its arguments, stdin, stdout, stderr and exit status.
+harness. It resolves the scope and the project, takes a lease, starts or
+reconciles the scope's box, renders the harness envelope, seeds the agent dir,
+and runs Pi in one container with stdin, stdout and stderr attached. It
+propagates the container's exit status, releases the lease and removes the
+container with `--rm`; the last lease of a lease-managed box stops the box.
 
 ```
-profile command  →  msbx-run  →  msbx up  →  msbx env export  →  exec dsh "$@"
+profile command  →  msbx-run  →  lease + msbx up  →  docker run <pin> pi "$@"
+                                 →  release, down on the last lease
 ```
 
 ## The launch
 
-1. **Harness** — `MSBX_HARNESS`, else `dsh` on `PATH`. A harness that resolves to
-   `msbx-run` itself is refused, so a misconfigured profile cannot recurse.
-2. **Probe launches** — an argument equal to `--probe` or `--list-models` is a
-   harness question, not a task. The wrapper resolves no scope, starts no box
-   and never calls Docker; it execs the harness immediately.
-3. **No manifest** — a checkout with no `.multica/compose.yaml`, or a Compose
-   file without an `x-msbx` block, is passed through untouched.
-4. **Manifest checkout** — the wrapper resolves the scope, reads
-   `x-msbx.project` from the manifest, runs `msbx up --scope S --project P` and
-   then `msbx env export --scope S --project P`. The exported names are added to
-   the harness's environment and the harness is exec'd. `up`'s summary is
-   captured, never written to the harness stdout.
+1. **Discovery** — `--version` prints the pinned Pi version from
+   `$XDG_STATE_HOME/msbx/image.json` and never needs Docker. `--probe`,
+   `--list-models` and the RPC discovery args
+   (`--mode rpc --no-session …`) run in a throwaway container from the pinned
+   digest: no scope, box, lease or mount, and the harness store as the only
+   environment file. `--list-models` output is cached by digest under
+   `$XDG_STATE_HOME/msbx/cache/`.
+2. **Scope** — `MSBX_SCOPE` (refused when invalid), the daemon task context
+   (`issue_id`, else `chat_session_id`), or the worktree branch
+   `agent/*/mir-<n>-*`. There is no parent lookup and no silent default.
+3. **Project** — `x-msbx.project` in the manifest, else `MSBX_PROJECT`, else a
+   key derived from the checkout directory. A `MSBX_PROJECT` that disagrees
+   with the manifest is refused.
+4. **Run id** — `MULTICA_TASK_ID`, else `MULTICA_RUN_ID`, else `run-<pid>`. The
+   lease file and the container name (`<project>-<scope>-harness-<task8>`) use
+   it.
+5. **Agent dir** — `$XDG_STATE_HOME/msbx/agents/<agent-id>/pi`, seeded once
+   from the image's `/opt/msbx/agent/` plus `roles/<agent-name>/` and marked by
+   `.msbx-seed` with the digest and the agent name. The seed is staged and
+   renamed, so a failed copy is not committed.
+6. **Lease and box** — the lease is written before `msbx up --lease <task>`.
+   The box renders `env/harness.env`; a manifest with services or tunnels adds
+   the scope's Compose network. A checkout without a manifest runs on the
+   default bridge with no service pairs and no box.
+7. **Container** — `docker run --rm -i --init` with the four mounts, the host
+   UID/GID, the harness env file, the daemon's `MULTICA_*` names and the image
+   digest, then Pi's argv verbatim.
+8. **Exit** — the container's status becomes the shim's. The lease is released;
+   when it was the last live lease and `up` marked the box lease-managed, the
+   shim runs `msbx down` (volumes, envelope and block stay). A SIGINT, SIGTERM
+   or SIGHUP removes the container, releases the lease, runs the same last-lease
+   check and exits 130.
 
-`msbx` itself is `MSBX_BIN`, else the `msbx` binary next to `msbx-run`, else
-`msbx` on `PATH`. The Multica CLI is `MULTICA_CLI_PATH` (the daemon injects it
-for a task), else `multica` on `PATH`.
+## The four mounts
 
-`msbx env export` prints `env/host.env`: shell-safe `export NAME='value'` lines
-with the scope's assigned loopback ports, so the host harness reaches a
-published role. The wrapper parses exactly those lines and applies the pairs to
-the harness process; it does not hand a store value to a shell and it prints no
-value. The envelope files remain the source of truth, so a probe and a task see
-the same contract.
+Each task-scoped path is mounted at its identical absolute host path:
 
-## Scope resolution
+| Path | Mode |
+| --- | --- |
+| the task workdir (the shim's cwd) | rw |
+| `MULTICA_TASK_CONFIG_ROOT`, when set | rw |
+| the parent directory of the argv's `--session`, when present | rw |
+| the agent dir, at `/home/agent/.pi` | rw |
 
-The scope is, in order:
+There is no `$HOME`, no `~/.ssh`, no `~/.config`, no Docker socket and no
+ambient checkout. `MULTICA_TASK_CONFIG_ROOT` and the session directory must
+exist before the box starts; a missing one is a loud error. `--session` names a
+file in the daemon's session store, so the path identity is what Pi's resume
+needs.
 
-1. `--scope` from the CLI caller, else `MSBX_SCOPE` (the wrapper has no flag, so it reads the variable the daemon injects). It is normalized
-   (`MIR-42` → `mir-42`) and refused with a loud error when it is not a valid
-   key. `MSBX_EPIC` is retired: setting it is an error naming `MSBX_SCOPE`, never
-   a silent alias.
-2. The daemon's task-context marker, `.multica/daemon_task_context.json`, beside
-   or above the checkout. It names the issue (`issue_id`) when the checkout is on
-   the task's own `agent/<role>/<task-slot>` branch — the branch the daemon
-   creates — rather than a branch named after the issue; or the chat session
-   (`chat_session_id`), whose scope is `chat-` plus its first eight characters.
-   Both present means the issue wins.
-3. The checkout branch, when it matches `agent/<role>/mir-<n>[-<slug>]`. The
-   branch names the *issue* and the issue is the scope: `mir-<n>`. There is no
-   parent lookup, so retries, follow-ups and stages of one ticket share its box
-   and sibling tickets never do.
+## What the container sees
 
-Resolution failures are loud and name the next step: a failed
-`multica issue get`, an identifier that is not a valid scope key, a detached HEAD
-with no task-context marker, or a checkout whose branch and marker name no scope
-at all. There is no silent default and no parent lookup. The result is not
-cached; the branch and marker are cheap to read, and the issue lookup is one
-`multica issue get`.
+The host environment is not inherited. The shim passes only the daemon's
+`MULTICA_*` names, by name rather than by value, and rewrites
+`MULTICA_CLI_PATH` to `/usr/local/bin/multica`; the values therefore never
+appear in Docker's argv. `HOME`, `PATH` and `PI_*` come from the image.
+`env/harness.env` is passed as `--env-file` (mode 0600) and carries the
+container ports, every declared env value, every declared secret's value and
+the harness store.
+
+On Linux the shim adds `host.docker.internal:host-gateway`; Docker Desktop
+provides it on macOS. The image's entrypoint forwards
+`127.0.0.1:$MULTICA_DAEMON_PORT` to the host, so the in-image CLI's hard-coded
+loopback endpoints work. The container joins the scope's Compose network, so
+`MSBX_<ROLE>_HOST`/`_PORT` and the dotted alias reach a published role
+directly.
+
+## Leases and sweeps
+
+The lease is
+`$XDG_STATE_HOME/msbx/leases/<project>/<scope>/<task>.json`: host PID, start
+time, container name. It is stale when the PID is gone or it is older than 24
+hours. `msbx up` drops its scope's stale leases and removes that scope's orphan
+harness containers; `msbx gc` sweeps every stale lease and every harness
+container labelled `com.msbx.harness=true` whose lease is stale or gone. A shim
+killed before it can release is therefore cleaned up: its container by the
+label, its lease by the PID check. `gc --dry-run` lists both without changing
+anything.
+
+The lease write and the last-lease check take the same lock beside the leases.
+A run that starts as the previous one exits either records its lease before the
+check (and keeps the box) or waits for the stop and starts the box again; two
+shims exiting together cannot both leave it up, or both stop it.
 
 ## Failure modes
 
-| Situation | Default | `MSBX_RUN_SOFT=1` |
-| --- | --- | --- |
-| No manifest | pass through | pass through |
-| `--probe` / `--list-models` | pass through | pass through |
-| Scope cannot be resolved | exit 1, harness not started | warning, harness runs without the envelope |
-| `msbx up` fails | exit 1, harness not started | warning, harness runs without the envelope |
-| `msbx env export` fails | exit 1, harness not started | warning, harness runs without the envelope |
-| Harness cannot be launched | exit 1 | exit 1 |
+| Situation | Result |
+| --- | --- |
+| Scope cannot be resolved | exit 1, no box and no container |
+| Image pin missing or malformed | exit 1, names `msbx image build` / `msbx image pin` |
+| Seed fails | exit 1, no agent dir, no lease |
+| `msbx up` fails | exit 1, lease released, no container |
+| Container cannot launch | exit 1, lease released, box stopped if last |
+| Container exits non-zero | that status is the shim's |
+| SIGINT, SIGTERM or SIGHUP | container removed, lease released, last-lease check, exit 130 |
+| Shim is SIGKILLed | stale lease and orphan container are swept by the next `up`/`gc` |
 
-`MSBX_RUN_SOFT=1` exists so a broken sandbox degrades to the previous behaviour
-instead of blocking the task. It is an explicit opt-in, not a default.
+There is no host-harness fallback and no soft mode: a stopped Docker fails the
+run loudly. `MSBX_RUN_SOFT` is retired.
 
 ## Profile wiring
 
@@ -92,32 +129,27 @@ cargo install --path .
 command -v msbx msbx-run
 ```
 
-In the Multica runtime profile, set the harness command (`command_name`) to
-`msbx-run` and set `MSBX_HARNESS` to the absolute path of the harness the
-profile launched before. Keep the daemon-injected `MULTICA_CLI_PATH` — it is
-what the resolver calls. The wrapper is quiet on success; a failure is written
-to stderr with the scope or the command that failed.
+In the Multica runtime profile, set `command_name` to `msbx-run` and keep the
+daemon-injected `MULTICA_CLI_PATH`; the shim rewrites it. No `MSBX_HARNESS` is
+read. The profile has no fixed args. The daemon discovers the version with
+`--version` and the models with `--list-models`/the RPC probe.
 
-Rollback is the same edit in reverse:
-
-1. Set the profile's `command_name` back to the harness path.
-2. Remove `MSBX_HARNESS` from the profile environment.
-
-Boxes stay up through a rollback; the wrapper owns no Multica state. Stop or
-destroy them with `msbx down --scope S` or `msbx rm --scope S --yes`.
+Rollback is the profile edit in reverse: point `command_name` back at the host
+harness and remove the shim from `PATH`. Boxes and leases stay; `msbx down
+--scope S` stops a box, `msbx rm --scope S --yes` destroys it.
 
 ## Limits
 
-- `--probe` and `--list-models` intentionally skip scope resolution. They prove
-  the harness starts, not that the task's box is healthy.
-- The wrapper does not install the resolver, the `msbx dns` unit or the store.
-  `msbx init` and the project's own store remain separate steps.
-- `msbx-run` is not a security boundary: in this stage the harness runs on the
-  host with the host environment plus the exported values, the same trust domain
-  as before. Stage 3's container is the isolation boundary.
-- A repository without `.multica/compose.yaml` — this engine repository included
-  — is unaffected. The wrapper becomes visible only when a project declares a
-  manifest.
-- The task-context marker is daemon-owned and read-only. A runtime that does not
-  write one needs `MSBX_SCOPE` (or an `agent/*/mir-<n>-*` checkout branch); the
-  wrapper fails loudly rather than guessing a scope.
+- The shim is not a security boundary against the image or the workspace
+  repository: project trust `always` loads the mounted `.pi/` and `AGENTS.md`.
+  The blast radius is the checkout, the session, the task token and the daemon
+  port — no host home, SSH key or Docker socket.
+- SIGINT, SIGTERM and SIGHUP are handled; a SIGKILL has no cleanup hook, so its
+  stale lease and orphan container are left to the next `up` or `gc`. There is
+  no background supervisor in v1.
+- `--version` records no image build time, and `--probe` reports the image's
+  answer, not the box's health.
+- Probes read the harness store only; a project store value is not available to
+  a probe because no scope is resolved.
+- The task-context marker is daemon-owned and read-only. A runtime that does
+  not write one needs `MSBX_SCOPE` or an `agent/*/mir-<n>-*` checkout branch.

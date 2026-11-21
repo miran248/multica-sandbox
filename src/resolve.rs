@@ -108,17 +108,25 @@ fn normalize(raw: &str, source: &str) -> Result<String, ResolveError> {
 
 /// The daemon's marker, if there is one. It names the issue (a ticket scope) or
 /// the chat session (a chat scope); the issue wins when both are present.
-#[derive(Debug, Deserialize)]
-struct TaskContext {
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TaskContext {
     #[serde(default)]
     managed_by: String,
     #[serde(default)]
-    issue_id: Option<String>,
+    pub issue_id: Option<String>,
     #[serde(default)]
-    chat_session_id: Option<String>,
+    pub chat_session_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
-fn task_context(root: &Path) -> Result<Option<String>, ResolveError> {
+/// The marker's fields for the current workdir, when the daemon wrote one. The
+/// shim reads it for the agent id; scope resolution has its own use.
+pub fn task_context_fields(root: &Path) -> Option<TaskContext> {
+    read_task_context(root)
+}
+
+fn read_task_context(root: &Path) -> Option<TaskContext> {
     for dir in root.ancestors().take(ANCESTORS) {
         let path = dir.join(".multica").join(TASK_CONTEXT);
         let Ok(text) = fs::read_to_string(&path) else {
@@ -130,15 +138,23 @@ fn task_context(root: &Path) -> Result<Option<String>, ResolveError> {
         if context.managed_by != "multica-daemon-task" {
             continue;
         }
-        if let Some(issue) = context.issue_id.filter(|issue| !issue.is_empty()) {
-            return issue_scope(&issue).map(Some);
-        }
-        if let Some(chat) = context
-            .chat_session_id
-            .filter(|session| !session.is_empty())
-        {
-            return chat_scope(&chat).map(Some);
-        }
+        return Some(context);
+    }
+    None
+}
+
+fn task_context(root: &Path) -> Result<Option<String>, ResolveError> {
+    let Some(context) = read_task_context(root) else {
+        return Ok(None);
+    };
+    if let Some(issue) = context.issue_id.filter(|issue| !issue.is_empty()) {
+        return issue_scope(&issue).map(Some);
+    }
+    if let Some(chat) = context
+        .chat_session_id
+        .filter(|session| !session.is_empty())
+    {
+        return chat_scope(&chat).map(Some);
     }
     Ok(None)
 }

@@ -9,7 +9,8 @@ const USAGE: &str = "\
 msbx — one sandbox namespace per scope
 
 Usage:
-  msbx up [--scope S] [--project P] [--file F]   Start or reconcile the scope box
+  msbx up [--scope S] [--project P] [--file F] [--lease TASK]
+                                                 Start or reconcile the scope box
   msbx down [--scope S] [--project P]            Stop the box, keep its volumes
   msbx rm [--scope S] [--project P] [--yes]      Destroy the box and its volumes
   msbx status [--scope S] [--project P] [--json] Show boxes, health and ports
@@ -28,15 +29,18 @@ generated envelope and override outside the checkout and starts the Compose
 project. The scope is `--scope`, `MSBX_SCOPE`, the daemon task context or the
 worktree branch; `--epic` and `MSBX_EPIC` are retired and name the replacement.
 
-`env ls` prints the harness envelope's names without values; `env export`
-prints `env/host.env`, the host context with the assigned loopback ports. Both
-read what the last `up` rendered. A final ticket box (done, cancelled, archived
-or gone) and an idle chat or ticket box are removed by `gc`, which `--dry-run`
-only lists.
+`up --lease TASK` marks the box lease-managed: the last lease to leave stops
+it, while a manual `up` leaves it up. `env ls` prints the harness envelope's
+names without values; `env export` prints `env/host.env`, the host context with
+the assigned loopback ports. Both read what the last `up` rendered. A final
+ticket box (done, cancelled, archived or gone), an idle chat or ticket box, a
+stale lease and a harness container whose lease is stale or gone are removed by
+`gc`, which `--dry-run` only lists.
 
 `init` installs the msbx.test resolver and the msbx dns unit (or prints the one
-privileged command it needs), then runs C1-C7 against a synthetic two-scope
-project. `--check` installs nothing. `--keep` keeps the containers it created.
+privileged command it needs), then runs C1-C8 against a synthetic two-scope
+project. C8 is the harness-container check and skips until the image is
+pinned. `--check` installs nothing. `--keep` keeps the containers it created.
 
 Exit codes for init: 0 all checks passed, 1 a check failed, 2 one or more checks
 were skipped. Any non-zero exit means the run is not a pass.

@@ -19,6 +19,7 @@
 
 use crate::driver;
 use crate::env::{self, Envelope};
+use crate::lease;
 use crate::manifest::Manifest;
 use crate::ports::{Allocator, Block, ScopeMeta, CHAT_IDLE_SECS, FIRST_PORT, IDLE_SECS};
 use crate::resolve;
@@ -37,12 +38,13 @@ const WAIT_SECS: u64 = 240;
 const MULTICA: &str = "multica";
 
 const UP_USAGE: &str = "\
-usage: msbx up [--scope S] [--project P] [--file F]
+usage: msbx up [--scope S] [--project P] [--file F] [--lease TASK]
 
 Start or reconcile the scope's Compose project. The manifest is
 `.multica/compose.yaml` in the current checkout unless `--file` names it.
 The scope is `--scope`, else `MSBX_SCOPE`, else the daemon task context, else
 the worktree branch; a resolution failure is an error, never a default.
+`--lease TASK` marks the box lease-managed: the last lease to leave stops it.
 ";
 const DOWN_USAGE: &str = "\
 usage: msbx down [--scope S] [--project P]
@@ -122,6 +124,7 @@ struct Options {
     json: bool,
     yes: bool,
     dry_run: bool,
+    lease: Option<String>,
 }
 
 /// Parse a verb's flags. Every flag that is not allowed for this verb is a
@@ -149,6 +152,7 @@ fn parse(args: &[String], allowed: &[&str], usage: &str) -> Result<Options, Fail
             "--json" => options.json = true,
             "--yes" => options.yes = true,
             "--dry-run" => options.dry_run = true,
+            "--lease" => options.lease = Some(value(args, &mut index, arg)?),
             other => unreachable!("`{other}` passed the allowed list but has no arm"),
         }
         index += 1;
@@ -170,7 +174,13 @@ pub fn run_up(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let result = no_legacy()
-        .and_then(|_| parse(args, &["--scope", "--project", "--file"], UP_USAGE))
+        .and_then(|_| {
+            parse(
+                args,
+                &["--scope", "--project", "--file", "--lease"],
+                UP_USAGE,
+            )
+        })
         .and_then(|options| up(&options));
     finish("up", result)
 }
@@ -318,6 +328,12 @@ fn up(options: &Options) -> Result<(), Failure> {
         )));
     }
 
+    // A stale lease is a run that no longer exists; drop it before reading the
+    // box's claims, so the next last-lease check is honest.
+    if let Err(error) = lease::live(&project, &scope, at) {
+        eprintln!("msbx up: cannot sweep the stale leases for `{state_key}`: {error}");
+    }
+
     // Resolve every declared name before a block is spent or a container
     // starts: a missing value, a disallowed host name or a reserved name names
     // the name, the layer and the role and stops `up` here.
@@ -363,6 +379,21 @@ fn up(options: &Options) -> Result<(), Failure> {
         ))
     })?;
 
+    // The scope's own orphans: a harness container whose lease is stale or
+    // gone is removed before a new one starts. A failed sweep does not block
+    // `up` — the run itself would fail loudly on its own Docker problem.
+    match lease::sweep_containers(Some((&project, &scope)), false) {
+        Ok(removed) if !removed.is_empty() => {
+            println!(
+                "  swept {} stale harness container(s): {}",
+                removed.len(),
+                removed.join(", ")
+            );
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("msbx up: cannot sweep the harness containers: {error}"),
+    }
+
     let wait = WAIT_SECS.to_string();
     let compose_env = env::published_vars(&key, &published);
     let started = compose(
@@ -387,12 +418,16 @@ fn up(options: &Options) -> Result<(), Failure> {
                 dir: root.clone(),
                 published: scope::recorded(&published),
                 tunnels: scope::recorded_tunnels(&manifest),
+                lease_managed: options.lease.is_some(),
             },
             at,
         )
         .map_err(|error| Failure::run(format!("cannot record the box: {error}")))?;
 
     println!("up {state_key} (project {project}, scope {})", key.scope());
+    if let Some(task) = &options.lease {
+        println!("  lease {task} holds the box; the last lease to leave stops it");
+    }
     if let Some(previous) = &previous {
         for change in scope::publish_changes(previous, &published) {
             println!("publish changed: {change}");
@@ -633,6 +668,18 @@ fn gc(options: &Options) -> Result<(), Failure> {
         .load()
         .map_err(|error| Failure::run(format!("cannot read the state: {error}")))?;
 
+    // Drop stale claims from every run before anything else. The walk covers a
+    // manifest-less run, which writes a lease but no block, so its killed shim
+    // cannot leave a claim behind forever.
+    let stale_leases = if options.dry_run {
+        lease::stale_all(at)
+    } else {
+        lease::sweep_all(at).unwrap_or_else(|error| {
+            eprintln!("msbx gc: cannot sweep the leases: {error}");
+            Vec::new()
+        })
+    };
+
     let mut plans = Vec::new();
     for (key, entry) in &state.blocks {
         let Some(scope) = entry.scope.as_deref() else {
@@ -675,6 +722,24 @@ fn gc(options: &Options) -> Result<(), Failure> {
     }
 
     if plans.is_empty() {
+        print_stale_leases(&stale_leases, options.dry_run);
+        match lease::sweep_containers(None, options.dry_run) {
+            Ok(removed) if !removed.is_empty() => {
+                for name in &removed {
+                    if options.dry_run {
+                        println!("would remove orphan harness container {name}");
+                    } else {
+                        println!("removed orphan harness container {name}");
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return Err(Failure::run(format!(
+                    "cannot sweep harness containers: {error}"
+                )))
+            }
+        }
         println!("nothing to remove");
         return Ok(());
     }
@@ -709,6 +774,19 @@ fn gc(options: &Options) -> Result<(), Failure> {
             Err(error) => failures.push(format!("{}: {error}", plan.key)),
         }
     }
+    print_stale_leases(&stale_leases, options.dry_run);
+    match lease::sweep_containers(None, options.dry_run) {
+        Ok(removed) => {
+            for name in removed {
+                if options.dry_run {
+                    println!("would remove orphan harness container {name}");
+                } else {
+                    println!("removed orphan harness container {name}");
+                }
+            }
+        }
+        Err(error) => failures.push(format!("harness containers: {error}")),
+    }
     if failures.is_empty() {
         Ok(())
     } else {
@@ -716,6 +794,25 @@ fn gc(options: &Options) -> Result<(), Failure> {
             "could not sweep: {}",
             failures.join("; ")
         )))
+    }
+}
+
+fn print_stale_leases(tasks: &[String], dry_run: bool) {
+    if tasks.is_empty() {
+        return;
+    }
+    if dry_run {
+        println!(
+            "would drop {} stale lease(s): {}",
+            tasks.len(),
+            tasks.join(", ")
+        );
+    } else {
+        println!(
+            "dropped {} stale lease(s): {}",
+            tasks.len(),
+            tasks.join(", ")
+        );
     }
 }
 
@@ -963,6 +1060,14 @@ struct BoxStatus {
     last_used: u64,
     dir: Option<String>,
     services: Vec<ServiceStatus>,
+    leases: Vec<LeaseStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaseStatus {
+    task: String,
+    pid: u32,
+    started_at: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1029,6 +1134,14 @@ fn status(options: &Options) -> Result<(), Failure> {
             report.block.end,
             since
         );
+        if !report.leases.is_empty() {
+            let tasks: Vec<&str> = report
+                .leases
+                .iter()
+                .map(|lease| lease.task.as_str())
+                .collect();
+            println!("  leases {} ({})", report.leases.len(), tasks.join(", "));
+        }
         if report.services.is_empty() {
             println!("  no containers");
         }
@@ -1151,6 +1264,14 @@ fn box_status(key: &str, entry: &Entry) -> Result<BoxStatus, Failure> {
         }
     }
     services.sort_by(|left, right| left.role.cmp(&right.role));
+    let leases = lease::list(&project, &scope_key, state::now())
+        .into_iter()
+        .map(|lease| LeaseStatus {
+            task: lease.task,
+            pid: lease.pid,
+            started_at: lease.started_at,
+        })
+        .collect();
 
     Ok(BoxStatus {
         project,
@@ -1163,6 +1284,7 @@ fn box_status(key: &str, entry: &Entry) -> Result<BoxStatus, Failure> {
         last_used: entry.last_used,
         dir: entry.dir.clone(),
         services,
+        leases,
     })
 }
 

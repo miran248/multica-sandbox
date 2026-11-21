@@ -14,6 +14,7 @@
 use crate::dns;
 use crate::doctor::{MIN_COMPOSE, MIN_ENGINE};
 use crate::driver;
+use crate::image::Pin;
 use crate::manifest::Manifest;
 use crate::platform;
 use crate::ports::{Allocator, Block};
@@ -292,6 +293,7 @@ pub fn run(args: &[String]) -> ExitCode {
             ("C5", "in-scope"),
             ("C6", "isolation"),
             ("C7", "env"),
+            ("C8", "harness container"),
         ] {
             checks.push(Check::skip(
                 id,
@@ -308,6 +310,7 @@ pub fn run(args: &[String]) -> ExitCode {
     checks.push(check_in_scope(&scopes));
     checks.push(check_isolation(&scopes));
     checks.push(check_env(&scopes, &work));
+    checks.push(check_harness(&scopes, &work));
 
     drop(dns_guard);
     finish(&checks, &scopes, &work, keep)
@@ -744,6 +747,190 @@ fn tree_contains(dir: &Path, needle: &str) -> bool {
     false
 }
 
+/// C8: run a throwaway container from the pinned image against a real scope
+/// network and check the harness contract — the four mounts at identical
+/// paths, the host UID/GID on a bind-mounted write, the in-image CLI, a
+/// published role's alias and the agent-dir seed. Stage 4 owns the image; until
+/// it is pinned, C8 records a skip instead of a failure.
+fn check_harness(scopes: &[Scope], work: &Path) -> Check {
+    let pin = match Pin::load() {
+        Ok(pin) => pin,
+        Err(error) => {
+            return Check::skip(
+                "C8",
+                "harness container",
+                format!("skipped: no image pin yet ({error})"),
+            )
+        }
+    };
+    let Some(scope) = scopes.first() else {
+        return Check::skip("C8", "harness container", "skipped: no check scope");
+    };
+    let Some(identity) = host_identity() else {
+        return Check::fail("C8", "harness container", "cannot read the host UID/GID");
+    };
+    let Some(host_uid) = identity.split(':').next() else {
+        return Check::fail("C8", "harness container", "cannot read the host UID");
+    };
+
+    let dir = work.join("c8");
+    let workdir = dir.join("workdir");
+    let config = dir.join("config");
+    let sessions = dir.join("sessions");
+    let agent = dir.join("agent").join("pi");
+    for path in [&workdir, &config, &sessions, &agent] {
+        if let Err(error) = state::create_private_dir(path) {
+            return Check::fail(
+                "C8",
+                "harness container",
+                format!("cannot prepare {}: {error}", path.display()),
+            );
+        }
+    }
+    if let Err(error) = std::fs::write(
+        agent.join(".msbx-seed"),
+        format!("digest {}\nagent c8\n", pin.digest),
+    ) {
+        return Check::fail(
+            "C8",
+            "harness container",
+            format!("cannot write the seed marker: {error}"),
+        );
+    }
+
+    // The image's baseline must exist before the shim can seed anything.
+    let seed = format!(
+        "set -e\ncp -a /opt/msbx/agent/. {SEED_DIR}/\nif [ -d '/opt/msbx/agent/roles/implementer' ]; then cp -a '/opt/msbx/agent/roles/implementer'/. {SEED_DIR}/; fi\n",
+    );
+    let seeded = docker(
+        &[
+            "run",
+            "--rm",
+            "--user",
+            &identity,
+            "--entrypoint",
+            "/bin/sh",
+            "--volume",
+            &format!("{}:{SEED_DIR}:rw", agent.display()),
+            &pin.reference(),
+            "-c",
+            &seed,
+        ],
+        work,
+    );
+    if !seeded.ok {
+        return Check::fail(
+            "C8",
+            "harness container",
+            format!(
+                "the image baseline did not seed: {}",
+                one_line(&seeded.text())
+            ),
+        );
+    }
+
+    let alias = scope.alias("pg");
+    let script = format!(
+        "set -e\ntest \"$(id -u)\" = '{host_uid}' || exit 10\ntouch '{workfile}' || exit 11\ntest -w '{config}' || exit 12\ntest -x {cli} || exit 13\ntest -f '{seedfile}' || exit 14\ntest -n \"$(find /home/agent/.pi -mindepth 1 ! -name .msbx-seed | head -n 1)\" || exit 16\ngetent hosts '{alias}' >/dev/null || exit 15\necho ok\n",
+        workfile = workdir.join(".msbx-c8-write").display(),
+        config = config.display(),
+        cli = IN_IMAGE_CLI,
+        seedfile = "/home/agent/.pi/.msbx-seed",
+    );
+    let mut args = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--user".to_string(),
+        identity.clone(),
+        "--workdir".to_string(),
+        workdir.to_string_lossy().to_string(),
+        "--network".to_string(),
+        scope.project(),
+    ];
+    if cfg!(target_os = "linux") {
+        args.push("--add-host".to_string());
+        args.push("host.docker.internal:host-gateway".to_string());
+    }
+    for source in [&workdir, &config, &sessions] {
+        args.push("--volume".to_string());
+        args.push(format!("{}:{}:rw", source.display(), source.display()));
+    }
+    args.push("--volume".to_string());
+    args.push(format!("{}:/home/agent/.pi:rw", agent.display()));
+    args.push("--entrypoint".to_string());
+    args.push("/bin/sh".to_string());
+    args.push(pin.reference());
+    args.push("-c".to_string());
+    args.push(script);
+    let run = driver::run_owned("docker", &args);
+    let marker = workdir.join(".msbx-c8-write");
+    let owner = std::fs::metadata(&marker)
+        .ok()
+        .and_then(|meta| file_uid(&meta));
+    let _ = std::fs::remove_file(&marker);
+    if !run.ok {
+        return Check::fail(
+            "C8",
+            "harness container",
+            format!(
+                "the harness container check exited non-zero: {}",
+                one_line(&run.text())
+            ),
+        );
+    }
+    if owner != Some(host_uid.parse().unwrap_or(0)) {
+        return Check::fail(
+            "C8",
+            "harness container",
+            format!(
+                "the bind-mounted write is owned by {:?}, not uid {host_uid}",
+                owner
+            ),
+        );
+    }
+
+    Check::pass(
+        "C8",
+        "harness container",
+        format!(
+            "four mounts, uid {host_uid} on the bind write and in the container, {cli} present, {alias} resolves, agent dir seeded",
+            cli = IN_IMAGE_CLI
+        ),
+    )
+}
+
+/// The seed target inside the image.
+const SEED_DIR: &str = "/seed";
+/// The CLI the image must carry.
+const IN_IMAGE_CLI: &str = "/usr/local/bin/multica";
+
+fn docker(args: &[&str], dir: &Path) -> driver::Output {
+    driver::run_in(dir, "docker", args)
+}
+
+#[cfg(unix)]
+fn host_identity() -> Option<String> {
+    let uid = driver::run("id", &["-u"]);
+    let gid = driver::run("id", &["-g"]);
+    (uid.ok && gid.ok).then(|| format!("{}:{}", uid.stdout.trim(), gid.stdout.trim()))
+}
+
+#[cfg(not(unix))]
+fn host_identity() -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn file_uid(meta: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    Some(meta.uid())
+}
+
+#[cfg(not(unix))]
+fn file_uid(_meta: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
 fn skip_rest(checks: &mut Vec<Check>, why: &str) {
     for (id, title) in [
         ("C2", "ports"),
@@ -752,6 +939,7 @@ fn skip_rest(checks: &mut Vec<Check>, why: &str) {
         ("C5", "in-scope"),
         ("C6", "isolation"),
         ("C7", "env"),
+        ("C8", "harness container"),
     ] {
         checks.push(Check::skip(id, title, format!("skipped: {why}")));
     }
