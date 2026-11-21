@@ -2,8 +2,9 @@
 //!
 //! The file lives outside every checkout, under
 //! `$XDG_STATE_HOME/msbx/state.json` (default `~/.local/state/msbx/`), and is
-//! written atomically under a lock file. Only the port-block allocator writes
-//! it today; `up`, `rm` and `gc` extend the same entries later.
+//! written atomically under a lock file. An entry records the epic's port block
+//! and, once `up` has run, the keys, checkout and published ports it was
+//! started with; `down` refreshes it and `rm` and `gc` remove it.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -30,11 +31,30 @@ pub struct State {
 
 /// One epic's allocation. `assigned` is when the block was first recorded;
 /// `last_used` is when `msbx` last touched the epic and is what `gc` reads.
+///
+/// The remaining fields are written by `up`: the two keys, the checkout it was
+/// started from, and the role → host-port mapping the block was spent on. They
+/// are optional so a state file from before the lifecycle verbs still loads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub start: u16,
     pub assigned: u64,
     pub last_used: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    #[serde(default)]
+    pub published: Vec<PublishedPort>,
+}
+
+/// A role published from the host and the block port it was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedPort {
+    pub role: String,
+    pub port: u16,
 }
 
 impl State {
@@ -66,6 +86,12 @@ pub fn state_dir() -> PathBuf {
 /// The default state file.
 pub fn state_file() -> PathBuf {
     state_dir().join("state.json")
+}
+
+/// `$XDG_STATE_HOME/msbx/<project>/<epic>` — the epic's envelope directory,
+/// outside every checkout. The generated Compose override lives here.
+pub fn epic_dir(project: &str, epic: &str) -> PathBuf {
+    state_dir().join(project).join(epic)
 }
 
 /// The scratch directory one `init` run owns. It is under the state directory,
@@ -291,11 +317,37 @@ mod tests {
                 start: 23000,
                 assigned: 10,
                 last_used: 20,
+                project: Some("demo".to_string()),
+                epic: Some("epic-a".to_string()),
+                dir: Some("/home/demo/epic-a".to_string()),
+                published: vec![PublishedPort {
+                    role: "pg".to_string(),
+                    port: 23000,
+                }],
             },
         );
         store.save(&state).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.blocks["demo-epic-a"].start, 23000);
+        assert_eq!(loaded.blocks["demo-epic-a"].published[0].role, "pg");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_entry_from_before_the_lifecycle_verbs_still_loads() {
+        let dir = scratch("legacy");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("state.json");
+        create_private_dir(&dir).unwrap();
+        fs::write(
+            &path,
+            r#"{"version": 1, "blocks": {"demo-epic-a": {"start": 23000, "assigned": 1, "last_used": 2}}}"#,
+        )
+        .unwrap();
+        let loaded = Store::new(&path).load().unwrap();
+        let entry = &loaded.blocks["demo-epic-a"];
+        assert_eq!(entry.project, None);
+        assert!(entry.published.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

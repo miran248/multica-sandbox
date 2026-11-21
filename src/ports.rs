@@ -6,7 +6,7 @@
 //! when all 16 ports are free to bind; a recorded block is stable even if a
 //! container is not running, because a restart must keep the same ports.
 
-use crate::state::{now, Entry, State, Store};
+use crate::state::{now, Entry, PublishedPort, State, Store};
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
@@ -69,6 +69,8 @@ pub enum PortError {
         first: u16,
         last: u16,
     },
+    /// An operation named an epic with no recorded block.
+    Unknown(String),
 }
 
 impl fmt::Display for PortError {
@@ -79,6 +81,7 @@ impl fmt::Display for PortError {
                 f,
                 "no free {BLOCK_SIZE}-port block between {first} and {last}; release one with `msbx gc`"
             ),
+            PortError::Unknown(key) => write!(f, "no block is recorded for `{key}`"),
         }
     }
 }
@@ -169,6 +172,10 @@ impl Allocator {
                         start,
                         assigned: at,
                         last_used: at,
+                        project: None,
+                        epic: None,
+                        dir: None,
+                        published: Vec::new(),
                     },
                 );
                 self.store.save(&state)?;
@@ -224,6 +231,73 @@ impl Allocator {
         self.store.save(&state)?;
         Ok(stale)
     }
+
+    /// The recorded entry for `key`, without allocating or touching it.
+    pub fn entry(&self, key: &str) -> Result<Option<Entry>, PortError> {
+        Ok(self.store.load()?.blocks.get(key).cloned())
+    }
+
+    /// Record what the epic's block is spent on: its keys, checkout and
+    /// published role → port mapping. `last_used` is refreshed.
+    pub fn record(&self, key: &str, meta: &EpicMeta, at: u64) -> Result<(), PortError> {
+        let _lock = self.store.lock()?;
+        let mut state = self.store.load()?;
+        let entry = state
+            .blocks
+            .get_mut(key)
+            .ok_or_else(|| PortError::Unknown(key.to_string()))?;
+        entry.project = Some(meta.project.clone());
+        entry.epic = Some(meta.epic.clone());
+        entry.dir = Some(meta.dir.to_string_lossy().to_string());
+        entry.published = meta.published.clone();
+        entry.last_used = at;
+        self.store.save(&state)?;
+        Ok(())
+    }
+
+    /// Refresh `last_used` for `key`. Returns whether the key is recorded;
+    /// an absent box is a no-op, not an error.
+    pub fn touch(&self, key: &str, at: u64) -> Result<bool, PortError> {
+        let _lock = self.store.lock()?;
+        let mut state = self.store.load()?;
+        let Some(entry) = state.blocks.get_mut(key) else {
+            return Ok(false);
+        };
+        entry.last_used = at;
+        self.store.save(&state)?;
+        Ok(true)
+    }
+
+    /// Release `key` only if it is still idle for at least `idle` seconds.
+    /// `gc` re-checks after stopping the box, so a concurrent `up` keeps its
+    /// block instead of losing it to a stale reading.
+    pub fn release_if_idle(
+        &self,
+        key: &str,
+        idle: u64,
+        at: u64,
+    ) -> Result<Option<Block>, PortError> {
+        let _lock = self.store.lock()?;
+        let mut state = self.store.load()?;
+        match state.blocks.get(key) {
+            Some(entry) if at.saturating_sub(entry.last_used) >= idle => {}
+            _ => return Ok(None),
+        }
+        let Some(entry) = state.blocks.remove(key) else {
+            return Ok(None);
+        };
+        self.store.save(&state)?;
+        Ok(Some(Block { start: entry.start }))
+    }
+}
+
+/// What `up` records on an epic's block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpicMeta {
+    pub project: String,
+    pub epic: String,
+    pub dir: PathBuf,
+    pub published: Vec<PublishedPort>,
 }
 
 fn idle_entries(state: &State, idle: u64, at: u64) -> Vec<(String, Block)> {
@@ -356,6 +430,69 @@ mod tests {
         assert!(allocator.allocate("demo-epic-a", 1).is_ok());
         let error = allocator.allocate("demo-epic-b", 1).unwrap_err();
         assert!(matches!(error, PortError::Exhausted { .. }));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn records_and_touches_an_epic() {
+        let (allocator, dir) = test_allocator("record", 42100);
+        let block = allocator.allocate("demo-epic-a", 10).unwrap();
+        let meta = EpicMeta {
+            project: "demo".to_string(),
+            epic: "epic-a".to_string(),
+            dir: PathBuf::from("/home/demo/epic-a"),
+            published: vec![PublishedPort {
+                role: "pg".to_string(),
+                port: block.start,
+            }],
+        };
+        allocator.record("demo-epic-a", &meta, 20).unwrap();
+        let entry = allocator.entry("demo-epic-a").unwrap().unwrap();
+        assert_eq!(entry.project.as_deref(), Some("demo"));
+        assert_eq!(entry.epic.as_deref(), Some("epic-a"));
+        assert_eq!(entry.published[0].port, block.start);
+        assert_eq!(entry.last_used, 20);
+
+        assert!(allocator.touch("demo-epic-a", 30).unwrap());
+        assert_eq!(
+            allocator.entry("demo-epic-a").unwrap().unwrap().last_used,
+            30
+        );
+        assert!(!allocator.touch("demo-epic-b", 30).unwrap());
+
+        assert!(matches!(
+            allocator.record("demo-epic-b", &meta, 30),
+            Err(PortError::Unknown(_))
+        ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn release_if_idle_rechecks_the_window() {
+        let (allocator, dir) = test_allocator("release-if-idle", 42200);
+        let block = allocator.allocate("demo-epic-a", 1_000).unwrap();
+        // A concurrent `up` refreshed the entry: gc must keep it.
+        assert_eq!(
+            allocator
+                .release_if_idle("demo-epic-a", IDLE_SECS, 1_000 + IDLE_SECS)
+                .unwrap(),
+            Some(block)
+        );
+        let block = allocator.allocate("demo-epic-a", 1_000).unwrap();
+        let _ = allocator.touch("demo-epic-a", 2_000).unwrap();
+        assert_eq!(
+            allocator
+                .release_if_idle("demo-epic-a", IDLE_SECS, 1_000 + IDLE_SECS)
+                .unwrap(),
+            None
+        );
+        assert_eq!(allocator.block("demo-epic-a").unwrap(), Some(block));
+        assert_eq!(
+            allocator
+                .release_if_idle("demo-epic-a", IDLE_SECS, 2_000 + IDLE_SECS)
+                .unwrap(),
+            Some(block)
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }
