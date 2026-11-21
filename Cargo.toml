@@ -1,6 +1,7 @@
 [package]
 name = "multica-sandbox"
 version = "0.1.0"
+default-run = "msbx"
 edition = "2021"
 description = "Per-epic sandbox environments for Multica work"
 license = "MIT"
