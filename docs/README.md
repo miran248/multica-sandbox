@@ -17,7 +17,7 @@
 - Remote services: [tunnels.md](tunnels.md) — the `x-msbx.tunnels` sidecar, the
   `ssh` and `cloudflared` transports, their credentials and stated limits.
 
-The per-epic pages above record the MIR-178 delivery. [Spec
-0002](specs/0002-container-harness.md) renames epic to scope, adds the host and
-harness value layers, and moves the harness into a per-run container; the
-delivery stages rewrite the pages that state otherwise.
+The env, tunnel and wrapper pages are rekeyed to scope. Spec 0001 and ADR 0001
+record the superseded per-epic contract; [spec
+0002](specs/0002-container-harness.md) adds the host and harness value layers
+and moves the harness into a per-run container.

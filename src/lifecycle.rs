@@ -1,16 +1,17 @@
 //! The Compose lifecycle: `up`, `down`, `rm`, `status`, `gc` and the env verbs.
 //!
-//! One epic is one Compose project (`<project>-<epic>`). `up` validates the
-//! manifest, resolves the project's env and secret names from the store, gives
-//! the epic its port block, renders the envelope (per-role env files, secret
-//! files, harness env) and the override (container names, dotted aliases,
-//! loopback ports, env files, secret mounts, tunnel sidecars, network name) into
-//! the epic's directory outside the checkout, runs `docker compose up -d --wait`
-//! and records what it did. `down` stops the containers and keeps the volumes;
-//! `rm` destroys the project, its volumes and its block; `status` reports
-//! services, health, ports and tunnelled roles; `gc` destroys boxes idle for 14
-//! days and frees their blocks. `env ls` and `env export` read the rendered
-//! harness envelope.
+//! One scope is one Compose project (`<project>-<scope>`). `up` validates the
+//! manifest, refuses code in the box, resolves the project's env and secret
+//! names from the three value layers, gives the scope its port block, renders
+//! the envelope (per-role env files, secret files, the harness env and the host
+//! exports) and the override (container names, dotted aliases, loopback ports,
+//! env files, secret mounts, tunnel sidecars, network name) into the scope's
+//! directory outside the checkout, runs `docker compose up -d --wait` and
+//! records what it did. `down` stops the containers and keeps the volumes; `rm`
+//! destroys the project, its volumes, envelope, leases and block; `status`
+//! reports services, health, ports and tunnelled roles; `gc` is the lifecycle
+//! sweep: a final ticket, an idle backstop and `--dry-run`. `env ls` reads the
+//! rendered harness envelope and `env export` prints `env/host.env`.
 //!
 //! Nothing here prints a value from the store: names, roles and paths only.
 //! The override is still the only place names, ports and the Compose project
@@ -18,41 +19,46 @@
 
 use crate::driver;
 use crate::env::{self, Envelope};
-use crate::epic::{self, Key};
 use crate::manifest::Manifest;
-use crate::ports::{Allocator, Block, EpicMeta, IDLE_SECS};
+use crate::ports::{Allocator, Block, ScopeMeta, CHAT_IDLE_SECS, FIRST_PORT, IDLE_SECS};
+use crate::resolve;
+use crate::scope::{self, Key};
 use crate::state::{self, Entry};
-use crate::store::Store;
+use crate::store::Layers;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 /// How long `up` waits for the project to be running or healthy.
 const WAIT_SECS: u64 = 240;
+/// The Multica CLI, when the daemon did not provide one.
+const MULTICA: &str = "multica";
 
 const UP_USAGE: &str = "\
-usage: msbx up [--epic E] [--project P] [--file F]
+usage: msbx up [--scope S] [--project P] [--file F]
 
-Start or reconcile the epic's Compose project. The manifest is
+Start or reconcile the scope's Compose project. The manifest is
 `.multica/compose.yaml` in the current checkout unless `--file` names it.
-The epic is `--epic`, else `MSBX_EPIC`; it is required.
+The scope is `--scope`, else `MSBX_SCOPE`, else the daemon task context, else
+the worktree branch; a resolution failure is an error, never a default.
 ";
 const DOWN_USAGE: &str = "\
-usage: msbx down [--epic E] [--project P]
+usage: msbx down [--scope S] [--project P]
 
-Stop the epic's containers and keep its volumes and state. With no `--epic`,
+Stop the scope's containers and keep its volumes and state. With no `--scope`,
 every recorded box is stopped. An absent box is a no-op.
 ";
 const RM_USAGE: &str = "\
-usage: msbx rm [--epic E] [--project P] [--yes]
+usage: msbx rm [--scope S] [--project P] [--yes]
 
-Destroy the epic's project, its volumes and its port block. With no `--epic`,
-every recorded box is destroyed. `--yes` skips the confirmation prompt; a
-non-interactive run requires it.
+Destroy the scope's project, its volumes, envelope, leases and port block. With
+no `--scope`, every recorded box is destroyed. `--yes` skips the confirmation
+prompt; a non-interactive run requires it.
 ";
 const STATUS_USAGE: &str = "\
-usage: msbx status [--epic E] [--project P] [--json]
+usage: msbx status [--scope S] [--project P] [--json]
 
 Show each recorded box, its services, health and assigned loopback ports.
 `--json` is the machine-readable form.
@@ -60,15 +66,17 @@ Show each recorded box, its services, health and assigned loopback ports.
 const GC_USAGE: &str = "\
 usage: msbx gc [--dry-run]
 
-Remove boxes idle for 14 days and release their port blocks. `--dry-run` only
-lists them.
+The lifecycle sweep: remove a final ticket box (the issue is done, cancelled,
+archived or gone), a chat box idle for 2 days and a ticket box idle for 14 days.
+`--dry-run` only lists them.
 ";
 const ENV_USAGE: &str = "\
-usage: msbx env ls|export [--epic E] [--project P]
+usage: msbx env ls|export [--scope S] [--project P]
 
 `ls` prints the harness envelope's names without values; `export` prints
-shell-safe `export NAME=value` lines for the harness. The epic is `--epic`, else
-`MSBX_EPIC`; `msbx up` must have rendered the epic first.
+`env/host.env`, the host context with the assigned loopback ports. The scope is
+`--scope`, else `MSBX_SCOPE`, else the daemon task context, else the worktree
+branch; `msbx up` must have rendered the scope first.
 ";
 
 /// Why a verb did not finish. Usage errors exit 64, runtime errors 1.
@@ -97,13 +105,18 @@ fn finish(verb: &str, result: Result<(), Failure>) -> ExitCode {
     }
 }
 
+/// `MSBX_EPIC` is retired; every verb refuses it, naming `MSBX_SCOPE`.
+fn no_legacy() -> Result<(), Failure> {
+    resolve::refuse_legacy_env().map_err(|error| Failure::Usage(error.to_string()))
+}
+
 fn wants_help(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "-h" || arg == "--help")
 }
 
 #[derive(Debug, Default)]
 struct Options {
-    epic: Option<String>,
+    scope: Option<String>,
     project: Option<String>,
     file: Option<PathBuf>,
     json: bool,
@@ -111,20 +124,26 @@ struct Options {
     dry_run: bool,
 }
 
-/// Parse a verb's flags. Every flag an unknown-to-this-verb option is a usage
-/// error instead of being silently ignored.
+/// Parse a verb's flags. Every flag that is not allowed for this verb is a
+/// usage error instead of being silently ignored; the retired `--epic` names
+/// its replacement.
 fn parse(args: &[String], allowed: &[&str], usage: &str) -> Result<Options, Failure> {
     let mut options = Options::default();
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
+        if arg == "--epic" {
+            return Err(Failure::Usage(format!(
+                "`--epic` is retired; use `--scope` (a scope is a ticket like `mir-42` or a chat like `chat-1a2b3c4d`)\n\n{usage}"
+            )));
+        }
         if !allowed.contains(&arg) {
             return Err(Failure::Usage(format!(
                 "`{arg}` is not an option here\n\n{usage}"
             )));
         }
         match arg {
-            "--epic" => options.epic = Some(value(args, &mut index, arg)?),
+            "--scope" => options.scope = Some(value(args, &mut index, arg)?),
             "--project" => options.project = Some(value(args, &mut index, arg)?),
             "--file" => options.file = Some(PathBuf::from(value(args, &mut index, arg)?)),
             "--json" => options.json = true,
@@ -150,8 +169,9 @@ pub fn run_up(args: &[String]) -> ExitCode {
         print!("{UP_USAGE}");
         return ExitCode::SUCCESS;
     }
-    let result =
-        parse(args, &["--epic", "--project", "--file"], UP_USAGE).and_then(|options| up(&options));
+    let result = no_legacy()
+        .and_then(|_| parse(args, &["--scope", "--project", "--file"], UP_USAGE))
+        .and_then(|options| up(&options));
     finish("up", result)
 }
 
@@ -160,8 +180,9 @@ pub fn run_down(args: &[String]) -> ExitCode {
         print!("{DOWN_USAGE}");
         return ExitCode::SUCCESS;
     }
-    let result =
-        parse(args, &["--epic", "--project"], DOWN_USAGE).and_then(|options| down(&options));
+    let result = no_legacy()
+        .and_then(|_| parse(args, &["--scope", "--project"], DOWN_USAGE))
+        .and_then(|options| down(&options));
     finish("down", result)
 }
 
@@ -170,8 +191,9 @@ pub fn run_rm(args: &[String]) -> ExitCode {
         print!("{RM_USAGE}");
         return ExitCode::SUCCESS;
     }
-    let result =
-        parse(args, &["--epic", "--project", "--yes"], RM_USAGE).and_then(|options| rm(&options));
+    let result = no_legacy()
+        .and_then(|_| parse(args, &["--scope", "--project", "--yes"], RM_USAGE))
+        .and_then(|options| rm(&options));
     finish("rm", result)
 }
 
@@ -180,7 +202,8 @@ pub fn run_status(args: &[String]) -> ExitCode {
         print!("{STATUS_USAGE}");
         return ExitCode::SUCCESS;
     }
-    let result = parse(args, &["--epic", "--project", "--json"], STATUS_USAGE)
+    let result = no_legacy()
+        .and_then(|_| parse(args, &["--scope", "--project", "--json"], STATUS_USAGE))
         .and_then(|options| status(&options));
     finish("status", result)
 }
@@ -190,7 +213,9 @@ pub fn run_gc(args: &[String]) -> ExitCode {
         print!("{GC_USAGE}");
         return ExitCode::SUCCESS;
     }
-    let result = parse(args, &["--dry-run"], GC_USAGE).and_then(|options| gc(&options));
+    let result = no_legacy()
+        .and_then(|_| parse(args, &["--dry-run"], GC_USAGE))
+        .and_then(|options| gc(&options));
     finish("gc", result)
 }
 
@@ -199,10 +224,11 @@ pub fn run_env(args: &[String]) -> ExitCode {
         print!("{ENV_USAGE}");
         return ExitCode::SUCCESS;
     }
-    finish("env", env_command(args))
+    let result = no_legacy().and_then(|_| env_command(args));
+    finish("env", result)
 }
 
-/// `env ls|export`: read the harness envelope `up` rendered for one box.
+/// `env ls|export`: read what `up` rendered for one box.
 fn env_command(args: &[String]) -> Result<(), Failure> {
     let (verb, rest) = args
         .split_first()
@@ -216,10 +242,10 @@ fn env_command(args: &[String]) -> Result<(), Failure> {
             )))
         }
     };
-    let options = parse(rest, &["--epic", "--project"], ENV_USAGE)?;
-    let epic = resolve_epic(options.epic.as_deref())?;
+    let options = parse(rest, &["--scope", "--project"], ENV_USAGE)?;
+    let scope = resolve_scope(options.scope.as_deref())?;
     let selected = select(&Options {
-        epic: Some(epic.clone()),
+        scope: Some(scope.clone()),
         project: options.project,
         ..Options::default()
     })?;
@@ -227,27 +253,31 @@ fn env_command(args: &[String]) -> Result<(), Failure> {
         [only] => only,
         [] => {
             return Err(Failure::run(format!(
-                "no box for `{epic}`; run `msbx up` first"
+                "no box for `{scope}`; run `msbx up` first"
             )))
         }
-        _ => unreachable!("select refuses several boxes for one epic"),
+        _ => unreachable!("select refuses several boxes for one scope"),
     };
     let project = entry.project.as_deref().ok_or_else(|| {
         Failure::run(format!(
             "{key} has no recorded project; run `msbx up` again"
         ))
     })?;
-    let epic = entry
-        .epic
+    let scope = entry
+        .scope
         .as_deref()
-        .ok_or_else(|| Failure::run(format!("{key} has no recorded epic; run `msbx up` again")))?;
-    let harness = Envelope::read_harness(&state::epic_dir(project, epic))
-        .map_err(|error| Failure::run(error.to_string()))?;
+        .ok_or_else(|| Failure::run(format!("{key} has no recorded scope; run `msbx up` again")))?;
+    let dir = state::scope_dir(project, scope);
+
+    // `env` activity counts against the idle backstop.
+    let _ = Allocator::default_path().touch(key, state::now());
+
     if export {
-        for (name, value) in &harness {
-            println!("{}", env::export_line(name, value));
-        }
+        let text = Envelope::read_host(&dir).map_err(|error| Failure::run(error.to_string()))?;
+        print!("{text}");
     } else {
+        let harness =
+            Envelope::read_harness(&dir).map_err(|error| Failure::run(error.to_string()))?;
         for name in harness.keys() {
             println!("{name}");
         }
@@ -260,21 +290,49 @@ fn up(options: &Options) -> Result<(), Failure> {
     within_home(&root)?;
     let manifest =
         Manifest::from_path(&manifest_path).map_err(|error| Failure::run(error.to_string()))?;
-    let project = resolve_project(&manifest, options.project.as_deref())?;
-    let epic = resolve_epic(options.epic.as_deref())?;
-    let key = Key::new(&project, &epic).map_err(|error| Failure::run(error.to_string()))?;
-    epic::check_publish(&manifest).map_err(|error| Failure::run(error.to_string()))?;
-
-    // Resolve every declared name before a block is spent or a container
-    // starts: a missing value names the name and stops `up` here.
-    let store = Store::for_project(&project);
-    let values = store
-        .values(&manifest)
+    manifest
+        .check_state_only(&root)
         .map_err(|error| Failure::run(error.to_string()))?;
+    let project = resolve_project(&manifest, options.project.as_deref())?;
+    let scope = resolve_scope(options.scope.as_deref())?;
+    let key = Key::new(&project, &scope).map_err(|error| Failure::run(error.to_string()))?;
+    scope::check_publish(&manifest).map_err(|error| Failure::run(error.to_string()))?;
 
     let allocator = Allocator::default_path();
     let state_key = key.compose_project();
     let at = state::now();
+
+    // A final scope is not restarted: the sweep it would have had happens here.
+    if let Finality::Final(reason) = finality(&scope)? {
+        let removed = destroy(
+            &allocator, &state_key, &project, &scope, true, IDLE_SECS, at,
+        );
+        let detail = match removed {
+            Ok(()) => "its box, volumes, envelope, leases and block were removed",
+            Err(error) => return Err(Failure::run(format!(
+                "refusing to start `{state_key}`: the scope is final ({reason}); the cleanup failed: {error}"
+            ))),
+        };
+        return Err(Failure::run(format!(
+            "refusing to start `{state_key}`: the scope is final ({reason}); {detail}"
+        )));
+    }
+
+    // Resolve every declared name before a block is spent or a container
+    // starts: a missing value, a disallowed host name or a reserved name names
+    // the name, the layer and the role and stops `up` here.
+    let layers = Layers::for_project(&project).map_err(|error| Failure::run(error.to_string()))?;
+    let values = layers
+        .values(&manifest)
+        .map_err(|error| Failure::run(error.to_string()))?;
+
+    // Render once against a provisional block so an unknown or retired token is
+    // refused before a block is spent. The real render follows the allocation.
+    let provisional = scope::published(&manifest, Block { start: FIRST_PORT })
+        .map_err(|error| Failure::run(error.to_string()))?;
+    Envelope::render(&key, &manifest, &provisional, &values)
+        .map_err(|error| Failure::run(error.to_string()))?;
+
     // The mapping recorded by the last `up`, if this box has been up before:
     // a first `up` has nothing to compare against.
     let previous = allocator
@@ -286,7 +344,7 @@ fn up(options: &Options) -> Result<(), Failure> {
         .map_err(|error| Failure::run(format!("cannot allocate a port block: {error}")))?;
 
     let published =
-        epic::published(&manifest, block).map_err(|error| Failure::run(error.to_string()))?;
+        scope::published(&manifest, block).map_err(|error| Failure::run(error.to_string()))?;
     let envelope = Envelope::render(&key, &manifest, &published, &values)
         .map_err(|error| Failure::run(error.to_string()))?;
     envelope.write().map_err(|error| {
@@ -297,7 +355,7 @@ fn up(options: &Options) -> Result<(), Failure> {
     })?;
 
     let override_path = key.override_path();
-    let override_text = epic::override_yaml(&key, &manifest, &published, &envelope);
+    let override_text = scope::override_yaml(&key, &manifest, &published, &envelope);
     state::write_private(&override_path, &override_text).map_err(|error| {
         Failure::run(format!(
             "cannot write the override {}: {error}",
@@ -323,20 +381,20 @@ fn up(options: &Options) -> Result<(), Failure> {
     allocator
         .record(
             &state_key,
-            &EpicMeta {
+            &ScopeMeta {
                 project: project.clone(),
-                epic: key.epic().to_string(),
+                scope: key.scope().to_string(),
                 dir: root.clone(),
-                published: epic::recorded(&published),
-                tunnels: epic::recorded_tunnels(&manifest),
+                published: scope::recorded(&published),
+                tunnels: scope::recorded_tunnels(&manifest),
             },
             at,
         )
         .map_err(|error| Failure::run(format!("cannot record the box: {error}")))?;
 
-    println!("up {state_key} (project {project}, epic {})", key.epic());
+    println!("up {state_key} (project {project}, scope {})", key.scope());
     if let Some(previous) = &previous {
-        for change in epic::publish_changes(previous, &published) {
+        for change in scope::publish_changes(previous, &published) {
             println!("publish changed: {change}");
         }
     }
@@ -415,9 +473,9 @@ fn rm(options: &Options) -> Result<(), Failure> {
         println!("no box to remove");
         return Ok(());
     }
-    if options.epic.is_none() && selected.len() > 1 {
+    if options.selected_is_all() && selected.len() > 1 {
         return Err(Failure::Usage(format!(
-            "refusing to remove {} boxes without --epic; name the box to destroy",
+            "refusing to remove {} boxes without --scope; name the box to destroy",
             selected.len()
         )));
     }
@@ -432,6 +490,12 @@ fn rm(options: &Options) -> Result<(), Failure> {
         if !removed.ok {
             failures.push(format!("{key}: {}", one_line(&removed.text())));
             continue;
+        }
+        if let (Some(project), Some(scope)) = (entry.project.as_deref(), entry.scope.as_deref()) {
+            if let Err(error) = remove_artifacts(project, scope) {
+                failures.push(format!("{key}: {error}"));
+                continue;
+            }
         }
         match allocator.release(key) {
             Ok(Some(block)) => println!("removed {key} ({block} freed)"),
@@ -449,6 +513,15 @@ fn rm(options: &Options) -> Result<(), Failure> {
             "could not remove: {}",
             failures.join("; ")
         )))
+    }
+}
+
+impl Options {
+    /// The verb addresses every box because neither `--scope` nor `MSBX_SCOPE`
+    /// names one.
+    fn selected_is_all(&self) -> bool {
+        self.scope.is_none()
+            && std::env::var_os(resolve::SCOPE_ENV).is_none_or(|value| value.is_empty())
     }
 }
 
@@ -471,6 +544,87 @@ fn confirm(selected: &[(String, Entry)]) -> Result<bool, Failure> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
+/// Why a ticket box is final, as far as the tracker is concerned.
+enum Finality {
+    Live,
+    Final(String),
+}
+
+/// A chat scope is never final on the tracker; a ticket scope is final when the
+/// issue is done, cancelled, archived or gone. "Gone" is only a not-found
+/// answer: any other failure of the lookup is a loud error, so a transient CLI
+/// or network problem never destroys a box.
+fn finality(scope: &str) -> Result<Finality, Failure> {
+    if scope.starts_with("chat-") {
+        return Ok(Finality::Live);
+    }
+    let output = Command::new(multica_bin())
+        .args(["issue", "get", scope, "--output", "json"])
+        .stdin(Stdio::null())
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(Failure::run(format!(
+                "cannot check the issue for scope `{scope}`: cannot run `{}`: {error}",
+                multica_bin().to_string_lossy()
+            )))
+        }
+    };
+    if !output.status.success() {
+        if is_not_found(&output) {
+            return Ok(Finality::Final("the issue is gone".to_string()));
+        }
+        return Err(Failure::run(format!(
+            "cannot check the issue for scope `{scope}`: `multica issue get` failed: {}",
+            one_line(&output_text(&output))
+        )));
+    }
+    let issue: Issue = match serde_json::from_slice(&output.stdout) {
+        Ok(issue) => issue,
+        // A live but unreadable answer is not a reason to destroy state.
+        Err(_) => return Ok(Finality::Live),
+    };
+    if issue.archived_at.is_some() {
+        return Ok(Finality::Final("the issue is archived".to_string()));
+    }
+    match issue.status_category.as_str() {
+        "done" => Ok(Finality::Final("the issue is done".to_string())),
+        "cancelled" => Ok(Finality::Final("the issue is cancelled".to_string())),
+        _ => Ok(Finality::Live),
+    }
+}
+
+/// The not-found answer is the only failure that means "the issue is gone".
+/// The CLI exits 4 for it; the text is not consulted, because a configuration or
+/// auth error can also say "not found" and must not destroy a box.
+fn is_not_found(output: &std::process::Output) -> bool {
+    output.status.code() == Some(4)
+}
+
+fn output_text(output: &std::process::Output) -> String {
+    format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct Issue {
+    #[serde(default)]
+    status_category: String,
+    #[serde(default)]
+    archived_at: Option<serde_json::Value>,
+}
+
+fn multica_bin() -> PathBuf {
+    std::env::var_os("MULTICA_CLI_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(MULTICA))
+}
+
 fn gc(options: &Options) -> Result<(), Failure> {
     let allocator = Allocator::default_path();
     let at = state::now();
@@ -478,34 +632,81 @@ fn gc(options: &Options) -> Result<(), Failure> {
         .store()
         .load()
         .map_err(|error| Failure::run(format!("cannot read the state: {error}")))?;
-    let stale = allocator
-        .release_idle(IDLE_SECS, at, true)
-        .map_err(|error| Failure::run(error.to_string()))?;
-    if stale.is_empty() {
-        println!("nothing to release");
+
+    let mut plans = Vec::new();
+    for (key, entry) in &state.blocks {
+        let Some(scope) = entry.scope.as_deref() else {
+            // A state file from before the lifecycle verbs: idle only.
+            let idle = at.saturating_sub(entry.last_used);
+            if idle >= IDLE_SECS {
+                plans.push(Plan {
+                    key: key.clone(),
+                    project: entry.project.clone(),
+                    scope: None,
+                    block: Block { start: entry.start },
+                    idle,
+                    final_state: false,
+                    reason: format!("idle {}", age(idle)),
+                });
+            }
+            continue;
+        };
+        let idle = at.saturating_sub(entry.last_used);
+        let finality = finality(scope)?;
+        let window = if scope.starts_with("chat-") {
+            CHAT_IDLE_SECS
+        } else {
+            IDLE_SECS
+        };
+        let (final_state, reason) = match finality {
+            Finality::Final(reason) => (true, reason),
+            Finality::Live if idle >= window => (false, format!("idle {}", age(idle))),
+            Finality::Live => continue,
+        };
+        plans.push(Plan {
+            key: key.clone(),
+            project: entry.project.clone(),
+            scope: Some(scope.to_string()),
+            block: Block { start: entry.start },
+            idle,
+            final_state,
+            reason,
+        });
+    }
+
+    if plans.is_empty() {
+        println!("nothing to remove");
         return Ok(());
     }
 
     let mut failures = Vec::new();
-    for (key, block) in &stale {
-        let since = state
-            .blocks
-            .get(key)
-            .map(|entry| age(at.saturating_sub(entry.last_used)))
-            .unwrap_or_else(|| "unknown".to_string());
+    for plan in &plans {
         if options.dry_run {
-            println!("would remove {key} ({block}) idle {since}");
+            println!("would remove {} ({}) {}", plan.key, plan.block, plan.reason);
             continue;
         }
-        let removed = compose(key, None, &[], &["down", "-v", "--remove-orphans"]);
-        if !removed.ok {
-            failures.push(format!("{key}: {}", one_line(&removed.text())));
-            continue;
-        }
-        match allocator.release_if_idle(key, IDLE_SECS, at) {
-            Ok(Some(freed)) => println!("removed {key} ({freed} freed), idle {since}"),
-            Ok(None) => println!("kept {key}: touched during gc"),
-            Err(error) => failures.push(format!("{key}: {error}")),
+        let window = if plan
+            .scope
+            .as_deref()
+            .is_some_and(|scope| scope.starts_with("chat-"))
+        {
+            CHAT_IDLE_SECS
+        } else {
+            IDLE_SECS
+        };
+        let project = plan.project.as_deref().unwrap_or_default();
+        let scope = plan.scope.as_deref().unwrap_or_default();
+        match destroy(
+            &allocator,
+            &plan.key,
+            project,
+            scope,
+            plan.final_state,
+            window,
+            at,
+        ) {
+            Ok(()) => println!("removed {} ({}) {}", plan.key, plan.block, plan.reason),
+            Err(error) => failures.push(format!("{}: {error}", plan.key)),
         }
     }
     if failures.is_empty() {
@@ -518,52 +719,115 @@ fn gc(options: &Options) -> Result<(), Failure> {
     }
 }
 
+struct Plan {
+    key: String,
+    project: Option<String>,
+    scope: Option<String>,
+    block: Block,
+    #[allow(dead_code)]
+    idle: u64,
+    final_state: bool,
+    reason: String,
+}
+
+/// Stop the box, remove its volumes, envelope and leases, and release its block.
+/// A final scope releases unconditionally; an idle one re-checks the window so a
+/// concurrent `up` keeps its block.
+fn destroy(
+    allocator: &Allocator,
+    key: &str,
+    project: &str,
+    scope: &str,
+    final_state: bool,
+    window: u64,
+    at: u64,
+) -> Result<(), String> {
+    let removed = compose(key, None, &[], &["down", "-v", "--remove-orphans"]);
+    if !removed.ok {
+        return Err(one_line(&removed.text()));
+    }
+    if !project.is_empty() && !scope.is_empty() {
+        remove_artifacts(project, scope)?;
+    }
+    if final_state {
+        allocator
+            .release(key)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    } else {
+        allocator
+            .release_if_idle(key, window, at)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// The envelope and the leases live outside the checkout and belong to the box.
+fn remove_artifacts(project: &str, scope: &str) -> Result<(), String> {
+    for dir in [
+        state::scope_dir(project, scope),
+        state::leases_dir(project, scope),
+    ] {
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot remove {}: {error}", dir.display())),
+        }
+    }
+    Ok(())
+}
+
 /// The boxes a verb addresses: every recorded entry, or the one named by
-/// `--epic`/`--project`. An epic repeated across projects is an error, because
-/// acting on "the" box would be a guess.
+/// `--scope`/`MSBX_SCOPE` and `--project`. A scope repeated across projects is
+/// an error, because acting on "the" box would be a guess.
 fn select(options: &Options) -> Result<Vec<(String, Entry)>, Failure> {
     let state = Allocator::default_path()
         .store()
         .load()
         .map_err(|error| Failure::run(format!("cannot read the state: {error}")))?;
-    let epic = options
-        .epic
-        .as_deref()
-        .map(|raw| raw.trim().to_ascii_lowercase());
+    let raw = options
+        .scope
+        .clone()
+        .or_else(|| std::env::var(resolve::SCOPE_ENV).ok())
+        .filter(|scope| !scope.is_empty());
+    let scope = match raw.as_deref() {
+        Some(raw) => {
+            Some(scope::normalize_scope(raw).map_err(|error| Failure::run(error.to_string()))?)
+        }
+        None => None,
+    };
     let project = options.project.as_deref();
 
     let mut selected = Vec::new();
     for (key, entry) in state.blocks {
         if let Some(project) = project {
-            if box_project(&key, &entry) != Some(project) {
+            if entry.project.as_deref() != Some(project) {
                 continue;
             }
         }
-        let matches = match &epic {
+        let matches = match &scope {
             None => true,
-            Some(epic) => key == epic.as_str() || entry.epic.as_deref() == Some(epic.as_str()),
+            Some(scope) => key == scope.as_str() || entry.scope.as_deref() == Some(scope.as_str()),
         };
         if matches {
             selected.push((key, entry));
         }
     }
 
-    if epic.is_some() && selected.len() > 1 {
+    if scope.is_some() && selected.len() > 1 {
         let keys: Vec<&str> = selected.iter().map(|(key, _)| key.as_str()).collect();
         return Err(Failure::run(format!(
-            "`{}` matches several boxes ({}); pass --project or the full `<project>-<epic>` name",
-            options.epic.as_deref().unwrap_or_default(),
+            "`{}` matches several boxes ({}); pass --project or the full `<project>-<scope>` name",
+            raw.unwrap_or_default(),
             keys.join(", ")
         )));
     }
     Ok(selected)
 }
 
-fn box_project<'a>(key: &'a str, entry: &'a Entry) -> Option<&'a str> {
-    entry
-        .project
-        .as_deref()
-        .or_else(|| key.rsplit_once('-').map(|(project, _)| project))
+/// The scope a verb that reads one box addresses: the full resolution order.
+fn resolve_scope(explicit: Option<&str>) -> Result<String, Failure> {
+    resolve::resolve(explicit).map_err(|error| Failure::run(error.to_string()))
 }
 
 /// Resolve the manifest and the checkout root. The default is
@@ -625,17 +889,6 @@ fn resolve_project(manifest: &Manifest, explicit: Option<&str>) -> Result<String
         ))),
         _ => Ok(manifest.project.clone()),
     }
-}
-
-fn resolve_epic(explicit: Option<&str>) -> Result<String, Failure> {
-    let raw = explicit
-        .map(str::to_string)
-        .or_else(|| std::env::var("MSBX_EPIC").ok())
-        .filter(|epic| !epic.is_empty())
-        .ok_or_else(|| {
-            Failure::run("no epic: pass --epic <E> or set MSBX_EPIC (the wrapper supplies it)")
-        })?;
-    epic::normalize_epic(&raw).map_err(|error| Failure::run(error.to_string()))
 }
 
 /// Run `docker compose` for one project. `files` adds the manifest and the
@@ -704,7 +957,7 @@ struct StatusReport {
 #[derive(Debug, Serialize)]
 struct BoxStatus {
     project: String,
-    epic: String,
+    scope: String,
     compose_project: String,
     block: BlockStatus,
     last_used: u64,
@@ -771,7 +1024,7 @@ fn status(options: &Options) -> Result<(), Failure> {
             "{}  {}/{}  block {}..={}  idle {}",
             report.compose_project,
             report.project,
-            report.epic,
+            report.scope,
             report.block.start,
             report.block.end,
             since
@@ -817,13 +1070,9 @@ fn status(options: &Options) -> Result<(), Failure> {
 
 fn box_status(key: &str, entry: &Entry) -> Result<BoxStatus, Failure> {
     let containers = ps_containers(key)?;
-    let project = entry.project.clone().unwrap_or_else(|| {
-        key.rsplit_once('-')
-            .map(|(project, _)| project.to_string())
-            .unwrap_or_else(|| key.to_string())
-    });
-    let epic_key = entry.epic.clone().unwrap_or_default();
-    let names = Key::new(&project, &epic_key).ok();
+    let project = entry.project.clone().unwrap_or_default();
+    let scope_key = entry.scope.clone().unwrap_or_default();
+    let names = Key::new(&project, &scope_key).ok();
 
     let mut services: Vec<ServiceStatus> = containers
         .into_iter()
@@ -905,7 +1154,7 @@ fn box_status(key: &str, entry: &Entry) -> Result<BoxStatus, Failure> {
 
     Ok(BoxStatus {
         project,
-        epic: epic_key,
+        scope: scope_key,
         compose_project: key.to_string(),
         block: BlockStatus {
             start: entry.start,
@@ -1018,7 +1267,7 @@ mod tests {
 
     #[test]
     fn ps_accepts_an_array_and_one_object_per_line() {
-        let array = r#"[{"Service":"pg","Name":"signals-mir42-pg","State":"running","Health":"healthy","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":5432,"PublishedPort":23000,"Protocol":"tcp"}]}]"#;
+        let array = r#"[{"Service":"pg","Name":"signals-mir-42-pg","State":"running","Health":"healthy","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":5432,"PublishedPort":23000,"Protocol":"tcp"}]}]"#;
         let parsed = parse_ps(array).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].service, "pg");
@@ -1058,15 +1307,26 @@ mod tests {
 
     #[test]
     fn values_are_required() {
-        let args = vec!["--epic".to_string()];
+        let args = vec!["--scope".to_string()];
         assert!(matches!(
-            parse(&args, &["--epic"], UP_USAGE),
+            parse(&args, &["--scope"], UP_USAGE),
             Err(Failure::Usage(_))
         ));
         let args = vec!["--json".to_string()];
         assert!(matches!(
-            parse(&args, &["--epic"], UP_USAGE),
+            parse(&args, &["--scope"], UP_USAGE),
             Err(Failure::Usage(_))
         ));
+    }
+
+    #[test]
+    fn the_retired_flag_names_its_replacement() {
+        let args = vec!["--epic".to_string(), "mir-42".to_string()];
+        let error = match parse(&args, &["--scope"], UP_USAGE) {
+            Err(Failure::Usage(message)) => message,
+            _ => panic!("--epic must be refused"),
+        };
+        assert!(error.contains("`--epic` is retired"), "{error}");
+        assert!(error.contains("`--scope`"), "{error}");
     }
 }

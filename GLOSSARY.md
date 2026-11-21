@@ -23,11 +23,11 @@ Terms this repository uses in one specific sense. The vocabulary changed with
   pinned packages, the baseline agent dir, git, gh, the Linux Multica CLI, jq,
   ripgrep, socat and the workspace's language toolchains.
 - **Namespace** — the flat prefix shared by a scope's container and Compose
-  project names (`signals-mir42-*`). It keeps scopes from colliding.
+  project names (`signals-mir-42-*`). It keeps scopes from colliding.
 - **Role** — what a service does in a scope (`pg`, `pg-analytics`, `web`). A
   second instance is a second role, never a second container port.
 - **Alias** — the dotted host name a role answers to
-  (`pg.mir42.signals.msbx.test`). Aliases, not container names, carry the
+  (`pg.mir-42.signals.msbx.test`). Aliases, not container names, carry the
   hierarchy; the same string is the host name, the in-network alias and, for
   the harness, the service reached on the scope's Compose network.
 - **Zone** — `msbx.test`, the only local DNS domain the tool maintains, served
@@ -60,7 +60,7 @@ Terms this repository uses in one specific sense. The vocabulary changed with
   Compose is the v1 driver; no other driver is implemented.
 - **Init** — `msbx init`: the idempotent first-run setup on a fresh host. It
   installs the `msbx.test` resolver and the `msbx dns` unit, then runs the
-  C1–C8 checks ([MIR-178]). `--check` measures without changing the host.
+  C1–C7 checks ([MIR-178]; C8 lands with the harness container). `--check` measures without changing the host.
 - **State** — `~/.local/state/msbx/state.json`: the port blocks, scopes and
   lease bookkeeping `msbx` owns on this host. Written atomically under a lock
   and outside every checkout; `gc` releases idle blocks from it.

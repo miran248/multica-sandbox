@@ -1,6 +1,6 @@
 //! `msbx-run` — the Multica runtime profile's harness wrapper.
 //!
-//! It starts the epic's box when the checkout carries a manifest, exports the
+//! It starts the scope's box when the checkout carries a manifest, exports the
 //! rendered envelope and execs the real harness with the original arguments and
 //! stdin. See [`multica_sandbox::wrapper`].
 

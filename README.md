@@ -22,12 +22,14 @@ Compose network.
 
 ## Status
 
-**Spec proposed.** The contract is
+**Stage 2 on `spec/mir-270`.** The contract is
 [docs/specs/0002-container-harness.md](docs/specs/0002-container-harness.md);
-the decision record is [ADR 0002](docs/adr/0002-container-harness.md). `main`
-still delivers the per-epic box of
-[spec 0001](docs/specs/0001-per-epic-sandbox.md); the stages below move the
-harness into a container and re-key the box from epic to scope.
+the decision record is [ADR 0002](docs/adr/0002-container-harness.md). The box is
+keyed by scope and is state only: the value layers, the state-only refusals and
+the lifecycle sweep ([MIR-272](https://multica.ai/miran248/issues/MIR-272)) are
+delivered. `msbx-run` is still a host wrapper; the per-run Pi container and the
+pinned image are stages 3 and 4, and the release promotes the branch into
+`main`.
 
 ## What it will manage
 
@@ -43,7 +45,8 @@ harness into a container and re-key the box from epic to scope.
   idle days.
 - **State only, not code** — the box has services, volumes, ports and names.
   The app process runs in the harness container. `msbx` refuses a bind of the
-  checkout root and a service `build:` inside the checkout.
+  checkout root or an ancestor of it, and a service `build:` inside or containing
+  the checkout.
 - **Names, not fixed ports** — `<role>.<scope>.<project>.msbx.test` served by
   the `msbx dns` resolver, with a stable loopback port per published role from
   the scope's block.
@@ -82,19 +85,19 @@ LaunchAgent `test.msbx.dns` running `msbx dns`. On Linux it installs
 process cannot prompt for `sudo`, `init` prints the one privileged command it
 needs and fails C1 with it.
 
-It then runs C1–C8 against synthetic scopes: both run Postgres on `5432` on
+It then runs C1–C7 against two synthetic scopes: both run Postgres on `5432` on
 distinct loopback ports, the host reaches both, the dotted names answer
 `127.0.0.1`, a peer reaches `pg` by service name and alias, the scopes cannot
-reach each other, an env value and a secret file are visible without the secret
-entering the checkout, and a harness container sees its four mounts with the
-right owner and reaches a published role by name. Any `FAIL` exits 1, any
-`SKIP` exits 2. `--check` installs nothing.
+reach each other, and an env value and a secret file are visible without the
+secret entering the checkout. Any `FAIL` exits 1, any `SKIP` exits 2.
+`--check` installs nothing. C8, the harness-container check, lands with stage 3.
 
 ## State and ports
 
 The allocator records a 16-port block per scope in
 `~/.local/state/msbx/state.json`. The block is reused unchanged for the same
-scope and released by `msbx gc` after 14 idle days. Allocation skips a block
+scope and released by `msbx gc` when the ticket is final or after 14 idle days
+(2 for a chat). Allocation skips a block
 whose ports are already bound on `127.0.0.1` and fails loudly when none is free.
 
 `up` also records the scope's key, its checkout, the manifest and the role →
@@ -112,7 +115,7 @@ must agree with the manifest. The checkout must be under `$HOME`, and
 `~/projects` is refused.
 
 ```sh
-msbx up --scope mir-42 [--lease TASK] [--file .multica/compose.yaml]
+msbx up --scope mir-42 [--file .multica/compose.yaml]
 msbx status [--scope mir-42] [--json]
 msbx down --scope mir-42
 msbx rm --scope mir-42 --yes
@@ -134,10 +137,10 @@ scope's default network is `<project>-<scope>`, so two scopes never share one.
 `rm` runs `docker compose down -v --remove-orphans` and frees the block; a
 non-interactive `rm` requires `--yes`. Both are no-ops for an absent box, and
 both act on the Compose project name alone. `status` shows each box's services,
-health, leases and ports (`--json` for scripts), marking a tunnelled role as
+health and ports (`--json` for scripts), marking a tunnelled role as
 `tunnel:<via>`. `gc --dry-run` lists what it would remove: a ticket whose issue
-is done, cancelled, archived or gone; a box idle for 14 days; a stale lease; an
-orphaned harness container.
+is done, cancelled, archived or gone; a chat box idle for 2 days; a ticket box
+idle for 14 days. Stage 3 adds stale-lease and orphan-container sweeps.
 
 ## Environment and credentials
 
@@ -175,14 +178,14 @@ green release on `main`.
 ## Commands
 
 ```sh
-msbx up [--scope S] [--lease TASK] [--file F]  # start or reconcile the scope box
+msbx up [--scope S] [--file F]  # start or reconcile the scope box
 msbx down [--scope S]                          # stop it, keep its volumes
 msbx rm [--scope S] [--yes]                    # destroy it, free its block
-msbx status [--scope S] [--json]               # services, leases and ports
+msbx status [--scope S] [--json]               # services and ports
 msbx env ls|export [--scope S]                 # names, or exports for a host shell
-msbx gc [--dry-run]                            # final state, idle backstop, orphans
+msbx gc [--dry-run]                            # final-state and idle sweep
 msbx doctor                                    # describe the Docker host and the pin
-msbx init [--check] [--keep]                   # install the resolver, run C1-C8
+msbx init [--check] [--keep]                   # install the resolver, run C1-C7
 msbx image build|pin|show                      # the harness image
 msbx dns [--listen ADDR]                       # the msbx.test resolver (127.0.0.1:5335)
 msbx-run [harness args...]                     # the container shim

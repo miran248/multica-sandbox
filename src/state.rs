@@ -2,7 +2,7 @@
 //!
 //! The file lives outside every checkout, under
 //! `$XDG_STATE_HOME/msbx/state.json` (default `~/.local/state/msbx/`), and is
-//! written atomically under a lock file. An entry records the epic's port block
+//! written atomically under a lock file. An entry records the scope's port block
 //! and, once `up` has run, the keys, checkout and published ports it was
 //! started with; `down` refreshes it and `rm` and `gc` remove it.
 
@@ -29,8 +29,8 @@ pub struct State {
     pub blocks: BTreeMap<String, Entry>,
 }
 
-/// One epic's allocation. `assigned` is when the block was first recorded;
-/// `last_used` is when `msbx` last touched the epic and is what `gc` reads.
+/// One scope's allocation. `assigned` is when the block was first recorded;
+/// `last_used` is when `msbx` last touched the scope and is what `gc` reads.
 ///
 /// The remaining fields are written by `up`: the two keys, the checkout it was
 /// started from, the role → host-port mapping the block was spent on and the
@@ -44,7 +44,7 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub epic: Option<String>,
+    pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
     #[serde(default)]
@@ -99,10 +99,10 @@ pub fn state_file() -> PathBuf {
     state_dir().join("state.json")
 }
 
-/// `$XDG_STATE_HOME/msbx/<project>/<epic>` — the epic's envelope directory,
+/// `$XDG_STATE_HOME/msbx/<project>/<scope>` — the scope's envelope directory,
 /// outside every checkout. The generated Compose override lives here.
-pub fn epic_dir(project: &str, epic: &str) -> PathBuf {
-    state_dir().join(project).join(epic)
+pub fn scope_dir(project: &str, scope: &str) -> PathBuf {
+    state_dir().join(project).join(scope)
 }
 
 /// `$XDG_CONFIG_HOME/msbx`, defaulting to `~/.config/msbx`. Configuration, not
@@ -118,6 +118,32 @@ pub fn config_dir() -> PathBuf {
 /// outside every checkout. The manifest lists names; the values live here.
 pub fn store_dir(project: &str) -> PathBuf {
     config_dir().join("projects").join(project)
+}
+
+/// `$XDG_CONFIG_HOME/msbx/host.env` — the host value store. It sits below the
+/// project store: the project wins for the same name, and a project may read a
+/// host name only when [`host_allow_file`] lists it.
+pub fn host_env_file() -> PathBuf {
+    config_dir().join("host.env")
+}
+
+/// `$XDG_CONFIG_HOME/msbx/host-allow` — the allowlist beside the host store,
+/// one name per line, `#` comments.
+pub fn host_allow_file() -> PathBuf {
+    config_dir().join("host-allow")
+}
+
+/// `$XDG_CONFIG_HOME/msbx/harness/env` — the harness-only store. It carries the
+/// model credential, `GH_TOKEN` and the git identity, and never enters a
+/// service envelope.
+pub fn harness_env_file() -> PathBuf {
+    config_dir().join("harness").join("env")
+}
+
+/// `$XDG_STATE_HOME/msbx/leases/<project>/<scope>` — the leases one box holds.
+/// `gc` and `rm` remove the directory with the box.
+pub fn leases_dir(project: &str, scope: &str) -> PathBuf {
+    state_dir().join("leases").join(project).join(scope)
 }
 
 /// The scratch directory one `init` run owns. It is under the state directory,
@@ -347,14 +373,14 @@ mod tests {
         let store = Store::new(dir.join("state.json"));
         let mut state = State::new();
         state.blocks.insert(
-            "demo-epic-a".to_string(),
+            "mir-901".to_string(),
             Entry {
                 start: 23000,
                 assigned: 10,
                 last_used: 20,
                 project: Some("demo".to_string()),
-                epic: Some("epic-a".to_string()),
-                dir: Some("/home/demo/epic-a".to_string()),
+                scope: Some("mir-901".to_string()),
+                dir: Some("/home/demo/mir-901".to_string()),
                 published: vec![PublishedPort {
                     role: "pg".to_string(),
                     port: 23000,
@@ -368,8 +394,8 @@ mod tests {
         );
         store.save(&state).unwrap();
         let loaded = store.load().unwrap();
-        assert_eq!(loaded.blocks["demo-epic-a"].start, 23000);
-        assert_eq!(loaded.blocks["demo-epic-a"].published[0].role, "pg");
+        assert_eq!(loaded.blocks["mir-901"].start, 23000);
+        assert_eq!(loaded.blocks["mir-901"].published[0].role, "pg");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -381,11 +407,11 @@ mod tests {
         create_private_dir(&dir).unwrap();
         fs::write(
             &path,
-            r#"{"version": 1, "blocks": {"demo-epic-a": {"start": 23000, "assigned": 1, "last_used": 2}}}"#,
+            r#"{"version": 1, "blocks": {"mir-901": {"start": 23000, "assigned": 1, "last_used": 2}}}"#,
         )
         .unwrap();
         let loaded = Store::new(&path).load().unwrap();
-        let entry = &loaded.blocks["demo-epic-a"];
+        let entry = &loaded.blocks["mir-901"];
         assert_eq!(entry.project, None);
         assert!(entry.published.is_empty());
         let _ = fs::remove_dir_all(&dir);

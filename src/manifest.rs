@@ -8,6 +8,7 @@
 //! `project`.
 
 use crate::ports::Block;
+use crate::state;
 use serde_yaml_ng::{Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -16,10 +17,14 @@ use std::path::{Path, PathBuf};
 /// A validated manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
-    /// `x-msbx.project`: `[a-z0-9-]+`, never containing the epic.
+    /// `x-msbx.project`: `[a-z0-9-]+`, never containing the scope.
     pub project: String,
     /// Compose service names. Not validated as roles until referenced.
     pub services: BTreeSet<String>,
+    /// Service → bind-mount sources, as written. `up` refuses the checkout root.
+    pub volume_sources: BTreeMap<String, Vec<String>>,
+    /// Service → build context, as written. `up` refuses one inside the checkout.
+    pub build_contexts: BTreeMap<String, String>,
     /// Role → container port, in declaration order. The order fixes host ports.
     pub publish: Vec<(String, u16)>,
     /// Role → value names from the store.
@@ -30,7 +35,7 @@ pub struct Manifest {
     pub tunnels: BTreeMap<String, Tunnel>,
 }
 
-/// A remote service served by an in-epic tunnel sidecar.
+/// A remote service served by an in-scope tunnel sidecar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tunnel {
     pub host: String,
@@ -38,7 +43,7 @@ pub struct Tunnel {
     pub via: Via,
 }
 
-/// The tunnel transport. Both are generated as sidecars on the epic network.
+/// The tunnel transport. Both are generated as sidecars on the scope network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Via {
     Ssh,
@@ -128,7 +133,11 @@ impl Manifest {
             .as_mapping()
             .ok_or_else(|| ManifestError::new("the manifest must be a YAML mapping"))?;
 
-        let services = parse_services(root)?;
+        let Services {
+            names: services,
+            volume_sources,
+            build_contexts,
+        } = parse_services(root)?;
 
         let block = root.get("x-msbx").ok_or_else(|| {
             ManifestError::no_manifest("not a sandbox manifest: `x-msbx` is missing")
@@ -172,6 +181,8 @@ impl Manifest {
         let manifest = Manifest {
             project,
             services,
+            volume_sources,
+            build_contexts,
             publish,
             env,
             secrets,
@@ -187,6 +198,53 @@ impl Manifest {
             .iter()
             .position(|(name, _)| name == role)
             .and_then(|index| block.port(index))
+    }
+
+    /// The box is state, not code. `up` refuses a service volume whose source is
+    /// the checkout root or an ancestor of it (which exposes the checkout), and
+    /// a service `build:` whose context is inside the checkout, before it
+    /// allocates a block or starts a container. `$PWD`/`${PWD}` and
+    /// `$HOME`/`${HOME}` are expanded; any other interpolation in a path source
+    /// is refused rather than guessed.
+    pub fn check_state_only(&self, root: &Path) -> Result<(), ManifestError> {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| lexical(root));
+        let home = std::fs::canonicalize(state::home()).unwrap_or_else(|_| state::home());
+        for (role, sources) in &self.volume_sources {
+            for source in sources {
+                let expanded = expand_vars(source, &root, &home).map_err(|reason| {
+                    ManifestError::new(format!(
+                        "`services.{role}.volumes` source `{source}` {reason}; use a literal path so the checkout cannot be exposed"
+                    ))
+                })?;
+                if !is_path_source(&expanded) {
+                    // A named volume carries no host path.
+                    continue;
+                }
+                let path = resolve_path(&root, &expanded);
+                if path == root || root.starts_with(&path) {
+                    return Err(ManifestError::new(format!(
+                        "`services.{role}.volumes` binds the checkout root or an ancestor of it (`{source}` → {}; checkout {}); the box is state only, and mounting the checkout would make two scopes share code (mount a subpath instead)",
+                        path.display(),
+                        root.display()
+                    )));
+                }
+            }
+        }
+        for (role, context) in &self.build_contexts {
+            let expanded = expand_vars(context, &root, &home).map_err(|reason| {
+                ManifestError::new(format!(
+                    "`services.{role}.build` context `{context}` {reason}; use a literal path so the checkout cannot be built"
+                ))
+            })?;
+            let context = resolve_path(&root, &expanded);
+            if context == root || context.starts_with(&root) || root.starts_with(&context) {
+                return Err(ManifestError::new(format!(
+                    "`services.{role}.build` uses the build context {}, inside or containing the checkout; a live-code service is out of scope, and the app process runs in the harness container (publish an image instead)",
+                    context.display()
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn validate_roles(&self) -> Result<(), ManifestError> {
@@ -231,21 +289,213 @@ impl Manifest {
     }
 }
 
-fn parse_services(root: &Mapping) -> Result<BTreeSet<String>, ManifestError> {
+struct Services {
+    names: BTreeSet<String>,
+    volume_sources: BTreeMap<String, Vec<String>>,
+    build_contexts: BTreeMap<String, String>,
+}
+
+fn parse_services(root: &Mapping) -> Result<Services, ManifestError> {
     let Some(services) = root.get("services") else {
-        return Ok(BTreeSet::new());
+        return Ok(Services {
+            names: BTreeSet::new(),
+            volume_sources: BTreeMap::new(),
+            build_contexts: BTreeMap::new(),
+        });
     };
     let services = services
         .as_mapping()
         .ok_or_else(|| ManifestError::new("`services` must be a mapping"))?;
-    let mut names = BTreeSet::new();
-    for key in services.keys() {
+    let mut parsed = Services {
+        names: BTreeSet::new(),
+        volume_sources: BTreeMap::new(),
+        build_contexts: BTreeMap::new(),
+    };
+    for (key, value) in services {
         let name = key
             .as_str()
             .ok_or_else(|| ManifestError::new("service names must be strings"))?;
-        names.insert(name.to_string());
+        parsed.names.insert(name.to_string());
+        let Some(service) = value.as_mapping() else {
+            continue;
+        };
+        if let Some(volumes) = service.get("volumes") {
+            let sources = parse_volume_sources(name, volumes)?;
+            if !sources.is_empty() {
+                parsed.volume_sources.insert(name.to_string(), sources);
+            }
+        }
+        if let Some(build) = service.get("build") {
+            let context = parse_build_context(name, build)?;
+            parsed.build_contexts.insert(name.to_string(), context);
+        }
     }
-    Ok(names)
+    Ok(parsed)
+}
+
+/// The source of a service's volumes. A named volume has no source path and is
+/// not a bind; `check_state_only` decides that after interpolation. Both the
+/// short `source:target[:mode]` form and the long `{type: bind, source: …}` form
+/// are read.
+fn parse_volume_sources(role: &str, volumes: &Value) -> Result<Vec<String>, ManifestError> {
+    let list = volumes
+        .as_sequence()
+        .ok_or_else(|| ManifestError::new(format!("`services.{role}.volumes` must be a list")))?;
+    let mut sources = Vec::new();
+    for item in list {
+        let source = match item {
+            Value::String(text) => {
+                // One field is an anonymous volume target, not a bind source.
+                let mut fields = text.split(':');
+                let source = fields.next().unwrap_or_default();
+                fields
+                    .next()
+                    .filter(|_| !source.is_empty())
+                    .map(|_| source.to_string())
+            }
+            Value::Mapping(entry) => {
+                let bind = entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind == "bind");
+                bind.then(|| {
+                    entry
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .flatten()
+            }
+            _ => None,
+        };
+        if let Some(source) = source {
+            sources.push(source);
+        }
+    }
+    Ok(sources)
+}
+
+/// Expand the interpolation this check can decide: `$PWD`/`${PWD}` is the
+/// checkout root and `$HOME`/`${HOME}` is the host home. Every other variable
+/// is refused by name, because a path this check cannot resolve might be the
+/// checkout. The tokens are parsed, not substring-replaced: `$PWDX` is the
+/// variable `PWDX`, not `$PWD` plus `X`, and Compose would expand it too.
+fn expand_vars(source: &str, root: &Path, home: &Path) -> Result<String, String> {
+    let root = root.to_string_lossy();
+    let home = home.to_string_lossy();
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(index) = rest.find('$') {
+        out.push_str(&rest[..index]);
+        let after = &rest[index + 1..];
+        let (name, consumed) = if let Some(braced) = after.strip_prefix('{') {
+            let Some(end) = braced.find('}') else {
+                return Err(
+                    "has a `{` with no `}`, which this check cannot resolve (`$PWD`/`${PWD}` and `$HOME`/`${HOME}` only)"
+                        .to_string(),
+                );
+            };
+            let name = &braced[..end];
+            if !valid_var_name(name) {
+                return Err(format!(
+                    "uses the variable `${{{name}}}`, which this check cannot resolve (`$PWD`/`${{PWD}}` and `$HOME`/`${{HOME}}` only)"
+                ));
+            }
+            (name, end + 3)
+        } else {
+            let len = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .count();
+            if len == 0 {
+                return Err(
+                    "has a `$` that does not start a variable (`$PWD`/`${PWD}` and `$HOME`/`${HOME}` only)"
+                        .to_string(),
+                );
+            }
+            let name = &after[..len];
+            if !valid_var_name(name) {
+                return Err(format!(
+                    "uses the variable `${name}`, which this check cannot resolve (`$PWD`/`${{PWD}}` and `$HOME`/`${{HOME}}` only)"
+                ));
+            }
+            (name, len + 1)
+        };
+        match name {
+            "PWD" => out.push_str(&root),
+            "HOME" => out.push_str(&home),
+            other => {
+                return Err(format!(
+                    "uses the variable `${other}`, which this check cannot resolve (`$PWD`/`${{PWD}}` and `$HOME`/`${{HOME}}` only)"
+                ))
+            }
+        }
+        rest = &rest[index + consumed..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn valid_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A source is a path when Compose would treat it as one: an absolute path, or
+/// a relative path explicitly rooted at `.` or `..`. Anything else is a named
+/// volume.
+fn is_path_source(source: &str) -> bool {
+    source.starts_with('/')
+        || source == "."
+        || source == ".."
+        || source.starts_with("./")
+        || source.starts_with("../")
+}
+
+/// The build context of a service: `build: .` or `build: {context: …}`.
+fn parse_build_context(role: &str, build: &Value) -> Result<String, ManifestError> {
+    match build {
+        Value::String(context) => Ok(context.clone()),
+        Value::Mapping(entry) => entry
+            .get("context")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ManifestError::new(format!("`services.{role}.build.context` must be a string"))
+            }),
+        _ => Err(ManifestError::new(format!(
+            "`services.{role}.build` must be a path or a mapping"
+        ))),
+    }
+}
+
+/// Resolve a manifest path against the checkout root and remove `.` and `..`
+/// segments. A path that exists is canonicalized, so a symlinked checkout root
+/// is still refused.
+fn resolve_path(root: &Path, raw: &str) -> PathBuf {
+    let path = Path::new(raw);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let lexical = lexical(&joined);
+    std::fs::canonicalize(&lexical).unwrap_or(lexical)
+}
+
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn parse_project(value: &Value) -> Result<String, ManifestError> {
@@ -660,5 +910,108 @@ services:
         let manifest = Manifest::parse("x-msbx:\n  project: signals\nservices: {}\n").unwrap();
         assert!(manifest.publish.is_empty());
         assert!(manifest.services.is_empty());
+    }
+
+    #[test]
+    fn a_bind_of_the_checkout_root_is_refused() {
+        let root = Path::new("/home/me/signals");
+        for volumes in [
+            "      - ./:/work\n",
+            "      - .:/work\n",
+            "      - /home/me/signals:/work\n",
+        ] {
+            let text = format!(
+                "x-msbx:\n  project: signals\nservices:\n  web:\n    image: alpine\n    volumes:\n{volumes}"
+            );
+            let error = Manifest::parse(&text)
+                .unwrap()
+                .check_state_only(root)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("checkout root"), "{text}: {error}");
+        }
+
+        let long = "x-msbx:\n  project: signals\nservices:\n  web:\n    image: alpine\n    volumes:\n      - type: bind\n        source: .\n        target: /work\n";
+        assert!(Manifest::parse(long)
+            .unwrap()
+            .check_state_only(root)
+            .is_err());
+    }
+
+    #[test]
+    fn an_ancestor_or_interpolated_bind_is_refused() {
+        let root = Path::new("/home/me/signals");
+        for (source, expected) in [
+            ("../:/work", "ancestor"),
+            ("${PWD}:/work", "ancestor"),
+            ("$PWD/..:/work", "ancestor"),
+            ("${DATA_DIR}/x:/work", "cannot resolve"),
+            ("$HOME_DIR:/work", "cannot resolve"),
+            ("$PWDX:/work", "cannot resolve"),
+            ("${PWD:-.}:/work", "cannot resolve"),
+        ] {
+            let text = format!(
+                "x-msbx:\n  project: signals\nservices:\n  web:\n    image: alpine\n    volumes:\n      - {source}\n"
+            );
+            let error = Manifest::parse(&text)
+                .unwrap()
+                .check_state_only(root)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "{source}: expected `{expected}` in {error}"
+            );
+        }
+
+        let home = std::fs::canonicalize(state::home()).unwrap();
+        let root = home.join("signals");
+        for source in ["${HOME}:/work", "$HOME:/work", "${HOME}/signals:/work"] {
+            let text = format!(
+                "x-msbx:\n  project: signals\nservices:\n  web:\n    image: alpine\n    volumes:\n      - {source}\n"
+            );
+            let error = Manifest::parse(&text)
+                .unwrap()
+                .check_state_only(&root)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("ancestor") || error.contains("checkout root"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_named_volume_and_a_subpath_are_allowed() {
+        let root = Path::new("/home/me/signals");
+        let text = "x-msbx:\n  project: signals\nservices:\n  web:\n    image: alpine\n    volumes:\n      - data:/var/lib/data\n      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro\n";
+        assert!(Manifest::parse(text)
+            .unwrap()
+            .check_state_only(root)
+            .is_ok());
+    }
+
+    #[test]
+    fn a_build_context_inside_the_checkout_is_refused() {
+        let root = Path::new("/home/me/signals");
+        for context in [".", "./", "./sub", ".."] {
+            let text =
+                format!("x-msbx:\n  project: signals\nservices:\n  web:\n    build: {context}\n");
+            let error = Manifest::parse(&text)
+                .unwrap()
+                .check_state_only(root)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("build context") && error.contains("checkout"),
+                "{text}: {error}"
+            );
+        }
+        let outside = "x-msbx:\n  project: signals\nservices:\n  web:\n    build:\n      context: ../shared\n";
+        assert!(Manifest::parse(outside)
+            .unwrap()
+            .check_state_only(root)
+            .is_ok());
     }
 }
