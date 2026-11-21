@@ -89,18 +89,19 @@ Names and tokens:
   scope. The first `up` allocates; the block is stable for the scope's life and
   is released by `rm`/`gc`.
 - `MSBX_<ROLE>_HOST` is the alias. `MSBX_<ROLE>_PORT` is the role's port in
-  the caller's context: the assigned loopback port in `msbx env export` (a host
-  shell) and the role's container port in the harness envelope (a container on
-  the scope network, the value `publish` or `tunnels` maps). Each pair is
+  the render's context: the assigned loopback port in `env/host.env` (what
+  `msbx env export` prints for a host shell), and the role's container port in
+  `env/harness.env` and `env/<role>.env` (a service or the container on the
+  scope network, the value `publish` or `tunnels` maps). Each pair is
   self-consistent for its side; code that uses the pair works on the host and
   in the harness, and code that hard-codes a port is wrong by construction.
 - `{{scope}}` replaces `{{epic}}`. `{{epic}}` is an error naming `{{scope}}`,
   never a silent alias. `{{host:<role>}}` is the alias in both contexts.
-  `{{port:<role>}}` becomes the role's container port, because every consumer of
-  a rendered value (a service, the harness container) is on the scope network;
-  it was the assigned loopback port while the harness ran on the host. The host
-  shell keeps the assigned port in `MSBX_<ROLE>_PORT`. `{{port:…}}` of an
-  unpublished role is still an error.
+  `{{port:<role>}}` renders per context too: the role's container port in the
+  service and harness contexts, because every consumer there is on the scope
+  network, and the assigned loopback port in the host context, because that is
+  what a host shell can reach. It was one value while the harness ran on the
+  host. `{{port:…}}` of an unpublished role is still an error.
 - `--epic`, `MSBX_EPIC` and the `Epic box` vocabulary are removed; each fails
   or reads as scope.
 
@@ -198,10 +199,11 @@ next `up` or `gc` drops it.
   scopes never do.
 
 **Final state.** A ticket scope is final when `multica issue get` reports
-`status_category` `done` or `closed`, when `archived_at` is set, or when the
-issue is gone. `msbx gc` removes the box, volumes, envelope, leases and block;
-`up` makes the same check for its own scope before it starts. A chat scope is
-final when it is idle for two days.
+`status_category` `done` or `cancelled`, when `archived_at` is set, or when the
+issue is gone. `cancelled` is terminal, not a backstop case: an abandoned epic
+must not keep its boxes for 14 days. `msbx gc` removes the box, volumes,
+envelope, leases and block; `up` makes the same check for its own scope before
+it starts. A chat scope is final when it is idle for two days.
 
 **Backstop.** A ticket box idle for 14 days is removed by `gc`. Idle means no
 lease and no `up`, `down` or `env` activity. The sweep also removes harness
@@ -234,12 +236,23 @@ Three stores, all outside every checkout and mode 0600:
   the layer and the role: `MULTICA_*`, `PI_*`, `HOME`, `PATH`, `HOSTNAME`. A
   declared name that collides with a generated `MSBX_<ROLE>_HOST`/`_PORT` is an
   error, as today. A role named `harness` in `x-msbx.env` is still refused.
-- `msbx up` renders per-scope under `$XDG_STATE_HOME/msbx/<project>/<scope>/`:
-  `env/<role>.env`, `env/harness.env`, `secrets/<NAME>` and `override.yaml`.
-  Files an earlier render produced and this one does not are removed.
-- `msbx env export` still prints shell-safe exports for a host shell; the shim
-  does not export store values into its own process, because the harness runs
-  in the container.
+- `msbx up` renders three contexts per-scope under
+  `$XDG_STATE_HOME/msbx/<project>/<scope>/`: `env/<role>.env` for a service
+  (container ports), `env/harness.env` for the harness container (container
+  ports), and `env/host.env` for a host shell (assigned loopback ports), plus
+  `secrets/<NAME>` and `override.yaml`. Files an earlier render produced and
+  this one does not are removed.
+- The harness container receives every declared env value and every declared
+  secret's value as an environment variable, because it cannot see the
+  services' `/run/msbx/secrets/` mounts and its mount set is closed. The service
+  envelope keeps the read-only secret mounts and `<NAME>_FILE`.
+- `msbx env export` prints the host context, `env/host.env`: shell-safe
+  exports with the assigned loopback ports, the same names as
+  `env/harness.env`, and `<NAME>_FILE` for a declared secret pointing at the
+  rendered `secrets/<NAME>` (the host can read it; the container gets the value
+  instead). It never prints `env/harness.env`, whose container ports are
+  unreachable from a host shell. The shim does not export store values into its
+  own process, because the harness runs in the container.
 
 ## Agent dir and repository trust
 
@@ -296,7 +309,7 @@ envelope paths, names, `gc`, `doctor`, `env`, docs and tests. `--scope` and
 | `down [--scope S]` | Stop the scope box, keep state. |
 | `rm [--scope S] [--yes]` | Destroy the scope box, volumes, envelope and block. |
 | `status [--scope S] [--json]` | Boxes, services, health, leases, ports. |
-| `env ls\|export [--scope S]` | Names, or shell-safe exports for a host shell. |
+| `env ls\|export [--scope S]` | Names, or the host-context exports (`env/host.env`, assigned ports). |
 | `gc [--dry-run]` | Final-state removal, idle backstop, stale leases, orphan harness containers. |
 | `image build\|pin\|show` | Build the image, record its digest, print the pin. |
 | `dns [--listen ADDR]` | The resolver daemon behind the installed unit. |
@@ -402,7 +415,7 @@ CLI, network alias, agent-dir seed), which is stage 3.
 | Stage | Ticket | Delivers |
 | --- | --- | --- |
 | 1 | [MIR-271](https://multica.ai/miran248/issues/MIR-271) | This spec, ADR 0002 and the vocabulary updates; closes on merge into `spec/mir-270`. |
-| 2 | [MIR-272](https://multica.ai/miran248/issues/MIR-272) | Re-key `msbx` to scope; the state-only box refusals; the host, project and harness stores, the allowlist and reserved names. |
+| 2 | [MIR-272](https://multica.ai/miran248/issues/MIR-272) | Re-key `msbx` to scope; the state-only box refusals; the host, project and harness stores, the allowlist and reserved names; the final-state `gc` (`done`/`cancelled`), the 14-day backstop and the 2-day chat sweep. |
 | 3 | [MIR-273](https://multica.ai/miran248/issues/MIR-273) | `msbx-run` as the container shim: mounts, path identity, leases, the daemon forwarder, the agent dir, probes and orphan sweep. |
 | 4 | [MIR-274](https://multica.ai/miran248/issues/MIR-274) | The pinned image: Pi, packages, baseline agent dir, CLI, toolchains; `msbx image build\|pin`. One real ticket run. |
 | 5 | [MIR-275](https://multica.ai/miran248/issues/MIR-275) | The provider-agnostic catalog selector in `multica-workspace`; `pi` accepted; exactly one online runtime. |

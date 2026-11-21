@@ -44,9 +44,11 @@ Terms this repository uses in one specific sense. The vocabulary changed with
   (`$XDG_CONFIG_HOME/msbx/harness/env`) carries the model credential and the
   GitHub token and never enters a service envelope.
 - **Envelope** — the rendered, per-scope material under
-  `$XDG_STATE_HOME/msbx/<project>/<scope>/`, mode 0600: `env/<role>.env`,
-  `env/harness.env` (what the harness container receives), `secrets/<NAME>` and
-  `override.yaml`. Materialized, never mounted through the checkout.
+  `$XDG_STATE_HOME/msbx/<project>/<scope>/`, mode 0600: `env/<role>.env` and
+  `env/harness.env` (container ports, for the services and the harness
+  container), `env/host.env` (assigned loopback ports, what `msbx env export`
+  prints), `secrets/<NAME>` and `override.yaml`. Materialized, never mounted
+  through the checkout.
 - **Token** — a `{{host:<role>}}`, `{{port:<role>}}`, `{{scope}}` or
   `{{project}}` placeholder in a store value. `msbx` substitutes it per scope
   at render time; an unknown token is an error. `{{epic}}` is refused and names

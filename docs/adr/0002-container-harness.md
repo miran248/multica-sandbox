@@ -59,8 +59,8 @@ below are the durable record.
    trust `always`; `AGENTS.md` loads as today.
 5. **Lifecycle is lease-driven.** `up` records a lease per run; the last lease
    to leave stops the box and keeps its volumes. `rm` happens when the ticket
-   is final (`status_category` done/closed, archived, or gone), at `up` for its
-   own scope and in `gc`; a 14-day idle backstop covers a ticket that never
+   is final (`status_category` done/cancelled, archived, or gone), at `up` for
+   its own scope and in `gc`; a 14-day idle backstop covers a ticket that never
    gets there, and a chat box is removed after two days. No background daemon;
    `gc` sweeps stale leases and orphaned harness containers too.
 6. **Env is layered and allowlisted.** A host store sits below the project

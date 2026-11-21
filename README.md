@@ -38,9 +38,9 @@ harness into a container and re-key the box from epic to scope.
   `MULTICA_*` and the store layers.
 - **One box per scope** — Compose project `<project>-<scope>`, containers
   `<project>-<scope>-<role>`, created on `up`, stopped when the last lease
-  leaves, destroyed by `rm` or by the final-state sweep. A ticket box carries
-  two sibling tickets' services without sharing them; a chat box is removed
-  after two idle days.
+  leaves, destroyed by `rm` or by the final-state sweep. Sibling tickets get
+  separate boxes, so a database is never shared; a chat box is removed after two
+  idle days.
 - **State only, not code** — the box has services, volumes, ports and names.
   The app process runs in the harness container. `msbx` refuses a bind of the
   checkout root and a service `build:` inside the checkout.
@@ -136,19 +136,21 @@ non-interactive `rm` requires `--yes`. Both are no-ops for an absent box, and
 both act on the Compose project name alone. `status` shows each box's services,
 health, leases and ports (`--json` for scripts), marking a tunnelled role as
 `tunnel:<via>`. `gc --dry-run` lists what it would remove: a ticket whose issue
-is done, closed, archived or gone; a box idle for 14 days; a stale lease; an
+is done, cancelled, archived or gone; a box idle for 14 days; a stale lease; an
 orphaned harness container.
 
 ## Environment and credentials
 
 The store is outside every checkout. The manifest lists names; `msbx` resolves
 them from the host store and the project store, with the project value winning,
-and renders per-role files plus `env/harness.env` for the container. A host
+and renders three contexts: per-role files and `env/harness.env` with the
+container ports, and `env/host.env` with the assigned loopback ports. A host
 name reaches a project only when `host-allow` lists it. The harness-only store
 (`~/.config/msbx/harness/env`) carries the model credential, `GH_TOKEN` and the
 git identity; it is never rendered into a service envelope. `MULTICA_*`, `PI_*`,
-`HOME`, `PATH` and `HOSTNAME` are refused at `up`. `msbx env export` remains the
-host-shell view.
+`HOME`, `PATH` and `HOSTNAME` are refused at `up`. `msbx env export` prints
+`env/host.env`, the host-shell view; the container ports are only for the
+services and the harness.
 
 ## The image
 
