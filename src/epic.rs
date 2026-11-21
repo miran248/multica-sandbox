@@ -1,17 +1,17 @@
-//! The epic namespace: keys, names, paths, published ports and the generated
-//! Compose override.
+//! The epic namespace: keys, names, paths, published ports, tunnel sidecars and
+//! the generated Compose override.
 //!
 //! Everything here is pure: the same [`Manifest`], [`Block`] and [`Envelope`]
 //! produce the same override text, so a second `up` regenerates an identical
 //! file and Compose changes nothing. The override is the only place container
-//! names, dotted aliases, loopback port mappings, env files and secret mounts
-//! and the epic's network name are decided.
+//! names, dotted aliases, loopback port mappings, env files, secret mounts,
+//! tunnel sidecars and the epic's network name are decided.
 
 use crate::dns;
 use crate::env::{Envelope, SECRET_MOUNT};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, Tunnel, Via};
 use crate::ports::{Block, BLOCK_SIZE};
-use crate::state::{self, PublishedPort};
+use crate::state::{self, PublishedPort, TunnelRecord};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -164,8 +164,11 @@ pub fn check_publish(manifest: &Manifest) -> Result<(), EpicError> {
 /// It carries, for every service: the container name, the dotted network alias,
 /// the `com.msbx.*` labels, a published role's loopback port mapping, the role's
 /// rendered `env_file` and each secret mounted read-only at
-/// `/run/msbx/secrets/<NAME>` with `<NAME>_FILE` in its environment. The default
-/// network is named after the Compose project.
+/// `/run/msbx/secrets/<NAME>` with `<NAME>_FILE` in its environment. A
+/// `x-msbx.tunnels` role gets a generated sidecar instead of a Compose service:
+/// it listens on the role's port inside the epic, carries the same alias and
+/// labels, and is never given a host port unless `publish` lists it. The
+/// default network is named after the Compose project.
 pub fn override_yaml(
     key: &Key,
     manifest: &Manifest,
@@ -182,43 +185,151 @@ pub fn override_yaml(
     for role in &manifest.services {
         out.push_str(&format!("  {role}:\n"));
         out.push_str(&format!("    container_name: {}\n", key.container(role)));
-        if let Some(port) = published.iter().find(|port| &port.role == role) {
-            out.push_str("    ports:\n");
-            out.push_str(&format!(
-                "      - \"127.0.0.1:{}:{}\"\n",
-                port.host_port, port.container_port
-            ));
-        }
-        if let Some(path) = envelope.role_env_file(role) {
-            out.push_str("    env_file:\n");
-            out.push_str(&format!(
-                "      - {}\n",
-                yaml_string(&path.to_string_lossy())
-            ));
-        }
-        let secrets = envelope.secret_mounts(role);
-        if !secrets.is_empty() {
-            out.push_str("    environment:\n");
-            for (name, _) in &secrets {
-                out.push_str(&format!("      {name}_FILE: {SECRET_MOUNT}/{name}\n"));
-            }
-            out.push_str("    volumes:\n");
-            for (name, source) in &secrets {
-                let mount = format!("{}:{SECRET_MOUNT}/{name}:ro", source.display());
-                out.push_str(&format!("      - {}\n", yaml_string(&mount)));
-            }
-        }
-        out.push_str("    labels:\n");
-        out.push_str(&format!("      com.msbx.project: {}\n", key.project()));
-        out.push_str(&format!("      com.msbx.epic: {}\n", key.epic()));
-        out.push_str(&format!("      com.msbx.role: {role}\n"));
-        out.push_str("    networks:\n      default:\n        aliases:\n");
-        out.push_str(&format!("          - {}\n", key.alias(role)));
+        push_ports(&mut out, published, role);
+        push_env_and_secrets(&mut out, envelope, role);
+        push_labels(&mut out, key, role, None);
+        push_alias(&mut out, key, role);
+    }
+    for (role, tunnel) in &manifest.tunnels {
+        out.push_str(&format!("  {role}:\n"));
+        out.push_str(&format!("    container_name: {}\n", key.container(role)));
+        push_transport(&mut out, role, tunnel);
+        push_ports(&mut out, published, role);
+        push_env_and_secrets(&mut out, envelope, role);
+        push_labels(&mut out, key, role, Some(tunnel));
+        push_alias(&mut out, key, role);
     }
     out.push_str("networks:\n  default:\n");
     out.push_str(&format!("    name: {}\n", key.network()));
     out
 }
+
+/// The loopback mapping for a published role. A tunnelled role spends its
+/// block port on the sidecar's listening port, exactly like a local service.
+fn push_ports(out: &mut String, published: &[Published], role: &str) {
+    if let Some(port) = published.iter().find(|port| port.role == role) {
+        out.push_str("    ports:\n");
+        out.push_str(&format!(
+            "      - \"127.0.0.1:{}:{}\"\n",
+            port.host_port, port.container_port
+        ));
+    }
+}
+
+/// The rendered env file and the read-only secret mounts. A tunnel sidecar
+/// receives them too, so a project's configuration is the same whether the
+/// role is local or remote.
+fn push_env_and_secrets(out: &mut String, envelope: &Envelope, role: &str) {
+    if let Some(path) = envelope.role_env_file(role) {
+        out.push_str("    env_file:\n");
+        out.push_str(&format!(
+            "      - {}\n",
+            yaml_string(&path.to_string_lossy())
+        ));
+    }
+    let secrets = envelope.secret_mounts(role);
+    if !secrets.is_empty() {
+        out.push_str("    environment:\n");
+        for (name, _) in &secrets {
+            out.push_str(&format!("      {name}_FILE: {SECRET_MOUNT}/{name}\n"));
+        }
+        out.push_str("    volumes:\n");
+        for (name, source) in &secrets {
+            let mount = format!("{}:{SECRET_MOUNT}/{name}:ro", source.display());
+            out.push_str(&format!("      - {}\n", yaml_string(&mount)));
+        }
+    }
+}
+
+fn push_labels(out: &mut String, key: &Key, role: &str, tunnel: Option<&Tunnel>) {
+    out.push_str("    labels:\n");
+    out.push_str(&format!("      com.msbx.project: {}\n", key.project()));
+    out.push_str(&format!("      com.msbx.epic: {}\n", key.epic()));
+    out.push_str(&format!("      com.msbx.role: {role}\n"));
+    if let Some(tunnel) = tunnel {
+        out.push_str(&format!("      com.msbx.tunnel: {}\n", tunnel.via.as_str()));
+    }
+}
+
+fn push_alias(out: &mut String, key: &Key, role: &str) {
+    out.push_str("    networks:\n      default:\n        aliases:\n");
+    out.push_str(&format!("          - {}\n", key.alias(role)));
+}
+
+/// How the generated sidecar terminates the tunnel. The `ssh` transport is a
+/// shell that installs the client, materializes any declared key/known-hosts
+/// secret and execs `ssh -N -L`; the `cloudflared` transport runs the
+/// transport binary with the role's Access credentials from its envelope.
+fn push_transport(out: &mut String, role: &str, tunnel: &Tunnel) {
+    match tunnel.via {
+        Via::Ssh => {
+            out.push_str("    image: alpine:3.20\n");
+            out.push_str("    command:\n      - sh\n      - -c\n      - |\n");
+            for line in ssh_command(role, tunnel).lines() {
+                out.push_str("        ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.push_str("    healthcheck:\n");
+            out.push_str(&format!(
+                "      test: [\"CMD-SHELL\", \"nc -z 127.0.0.1 {}\"]\n",
+                tunnel.port
+            ));
+            out.push_str("      interval: 5s\n      timeout: 3s\n      retries: 12\n");
+            out.push_str("      start_period: 30s\n");
+        }
+        Via::Cloudflared => {
+            out.push_str("    image: cloudflare/cloudflared:2026.11.1\n");
+            out.push_str("    command:\n      - access\n      - tcp\n      - --hostname\n");
+            out.push_str(&format!("      - {}\n", yaml_string(&tunnel.host)));
+            out.push_str("      - --url\n");
+            out.push_str(&format!("      - 0.0.0.0:{}\n", tunnel.port));
+        }
+    }
+}
+
+/// The `ssh` sidecar script. The role's envelope supplies the login and any
+/// transport settings: `MSBX_TUNNEL_SSH_USER` (required), `MSBX_TUNNEL_SSH_HOST`
+/// (the ssh endpoint, defaulting to the tunnel host), `MSBX_TUNNEL_SSH_PORT`
+/// (default 22), and the secrets `MSBX_TUNNEL_SSH_KEY` and
+/// `MSBX_TUNNEL_SSH_KNOWN_HOSTS`, each base64 (one line, as the store requires)
+/// and decoded to a private file before use.
+///
+/// Compose interpolates `$` in every string it reads, including this one, so a
+/// shell variable is written `$$VAR`: Compose hands the container a literal
+/// `$VAR` and the shell, not the host, expands it.
+fn ssh_command(role: &str, tunnel: &Tunnel) -> String {
+    SSH_COMMAND
+        .replace("@ROLE@", role)
+        .replace("@HOST@", &tunnel.host)
+        .replace("@PORT@", &tunnel.port.to_string())
+}
+
+const SSH_COMMAND: &str = r#"set -eu
+apk add --no-cache openssh-client >/dev/null
+: "$${MSBX_TUNNEL_SSH_USER:?x-msbx.env.@ROLE@ must declare MSBX_TUNNEL_SSH_USER}"
+set -- -N -T \
+  -o BatchMode=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ConnectTimeout=10 \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -p "$${MSBX_TUNNEL_SSH_PORT:-22}" \
+  -L "0.0.0.0:@PORT@:@HOST@:@PORT@"
+if [ -n "$${MSBX_TUNNEL_SSH_KEY_FILE:-}" ]; then
+  base64 -d "$$MSBX_TUNNEL_SSH_KEY_FILE" > /tmp/msbx-ssh-key
+  chmod 600 /tmp/msbx-ssh-key
+  set -- "$$@" -i /tmp/msbx-ssh-key
+fi
+if [ -n "$${MSBX_TUNNEL_SSH_KNOWN_HOSTS_FILE:-}" ]; then
+  base64 -d "$$MSBX_TUNNEL_SSH_KNOWN_HOSTS_FILE" > /tmp/msbx-known-hosts
+  set -- "$$@" -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=/tmp/msbx-known-hosts"
+else
+  mkdir -p /root/.ssh
+  set -- "$$@" -o StrictHostKeyChecking=accept-new
+fi
+exec ssh "$$@" "$${MSBX_TUNNEL_SSH_USER}@$${MSBX_TUNNEL_SSH_HOST:-@HOST@}"
+"#;
 
 /// A YAML double-quoted string. Paths under `$HOME` may carry spaces, and the
 /// rendered file lives outside the checkout, so they are always quoted.
@@ -233,6 +344,20 @@ pub fn recorded(published: &[Published]) -> Vec<PublishedPort> {
         .map(|port| PublishedPort {
             role: port.role.clone(),
             port: port.host_port,
+        })
+        .collect()
+}
+
+/// The generated tunnels, in the shape the state file keeps, so `status` can
+/// mark a role as remote after the checkout is gone.
+pub fn recorded_tunnels(manifest: &Manifest) -> Vec<TunnelRecord> {
+    manifest
+        .tunnels
+        .iter()
+        .map(|(role, tunnel)| TunnelRecord {
+            role: role.clone(),
+            via: tunnel.via.as_str().to_string(),
+            upstream: format!("{}:{}", tunnel.host, tunnel.port),
         })
         .collect()
 }
@@ -445,6 +570,118 @@ services:
         assert_eq!(
             publish_changes(&previous, &[]),
             vec!["pg no longer published (was 23000)"]
+        );
+    }
+
+    fn tunnel_manifest(via: &str, published: &str) -> Manifest {
+        Manifest::parse(&format!(
+            "x-msbx:\n  project: signals\n{published}  env:\n    pg: [MSBX_TUNNEL_SSH_USER]\n  secrets:\n    pg: [MSBX_TUNNEL_SSH_KEY, MSBX_TUNNEL_SSH_KNOWN_HOSTS]\n  tunnels:\n    pg:\n      host: db.internal.example.com\n      port: 5432\n      via: {via}\nservices:\n  client: {{}}\n"
+        ))
+        .unwrap()
+    }
+
+    fn tunnel_envelope(manifest: &Manifest) -> Envelope {
+        let mut values = crate::store::Values::default();
+        values
+            .env
+            .insert("MSBX_TUNNEL_SSH_USER".to_string(), "tunnel".to_string());
+        values.secrets.insert(
+            "MSBX_TUNNEL_SSH_KEY".to_string(),
+            "a2V5LW1hcmtlcg==".to_string(),
+        );
+        values.secrets.insert(
+            "MSBX_TUNNEL_SSH_KNOWN_HOSTS".to_string(),
+            "a25vd24tbWFya2Vy".to_string(),
+        );
+        Envelope::render(&key(), manifest, &[], &values).unwrap()
+    }
+
+    #[test]
+    fn a_tunnelled_role_gets_a_generated_ssh_sidecar() {
+        let manifest = tunnel_manifest("ssh", "");
+        let envelope = tunnel_envelope(&manifest);
+        let text = override_yaml(&key(), &manifest, &[], &envelope);
+        assert!(text.contains("  pg:\n"), "{text}");
+        assert!(text.contains("container_name: signals-mir-42-pg"), "{text}");
+        assert!(text.contains("image: alpine:3.20"), "{text}");
+        assert!(
+            text.contains("-L \"0.0.0.0:5432:db.internal.example.com:5432\""),
+            "the sidecar listens on the role's port and terminates the tunnel: {text}"
+        );
+        assert!(text.contains(" -L \"0.0.0.0:5432:"), "{text}");
+        assert!(
+            text.contains("ExitOnForwardFailure=yes") && text.contains("ConnectTimeout=10"),
+            "an unreachable endpoint fails instead of hanging: {text}"
+        );
+        assert!(
+            text.contains("$${MSBX_TUNNEL_SSH_USER"),
+            "Compose must not interpolate the shell's variables: {text}"
+        );
+        assert!(
+            text.contains("-o StrictHostKeyChecking=accept-new"),
+            "{text}"
+        );
+        assert!(
+            text.contains("test: [\"CMD-SHELL\", \"nc -z 127.0.0.1 5432\"]"),
+            "the sidecar is unhealthy when the listener is gone: {text}"
+        );
+        assert!(
+            text.contains("MSBX_TUNNEL_SSH_KEY_FILE: /run/msbx/secrets/MSBX_TUNNEL_SSH_KEY"),
+            "{text}"
+        );
+        assert!(
+            text.contains("com.msbx.tunnel: ssh"),
+            "a tunnel is labelled: {text}"
+        );
+        assert!(
+            text.contains("- pg.mir-42.signals.msbx.test"),
+            "the sidecar carries the dotted alias: {text}"
+        );
+        assert!(
+            !text.contains("127.0.0.1:23000:5432"),
+            "an unpublished tunnel has no host port: {text}"
+        );
+        assert!(
+            !text.contains("a2V5LW1hcmtlcg==") && !text.contains("a25vd24tbWFya2Vy"),
+            "no secret value enters the override: {text}"
+        );
+    }
+
+    #[test]
+    fn a_tunnelled_role_can_be_published_through_the_sidecar() {
+        let manifest = tunnel_manifest("ssh", "  publish:\n    pg: 5432\n");
+        let ports = published(&manifest, Block { start: 23000 }).unwrap();
+        let envelope = tunnel_envelope(&manifest);
+        let text = override_yaml(&key(), &manifest, &ports, &envelope);
+        assert!(text.contains("- \"127.0.0.1:23000:5432\""), "{text}");
+    }
+
+    #[test]
+    fn a_cloudflared_tunnel_uses_the_transport_image() {
+        let manifest = tunnel_manifest("cloudflared", "");
+        let envelope = tunnel_envelope(&manifest);
+        let text = override_yaml(&key(), &manifest, &[], &envelope);
+        assert!(
+            text.contains("image: cloudflare/cloudflared:2026.11.1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("      - access\n      - tcp\n      - --hostname\n      - \"db.internal.example.com\"\n      - --url\n      - 0.0.0.0:5432\n"),
+            "{text}"
+        );
+        assert!(!text.contains("127.0.0.1:23000:5432"), "{text}");
+    }
+
+    #[test]
+    fn recorded_tunnels_name_the_role_transport_and_upstream() {
+        let manifest = tunnel_manifest("cloudflared", "");
+        assert_eq!(
+            recorded_tunnels(&manifest),
+            vec![TunnelRecord {
+                role: "pg".to_string(),
+                via: "cloudflared".to_string(),
+                upstream: "db.internal.example.com:5432".to_string(),
+            }]
         );
     }
 }

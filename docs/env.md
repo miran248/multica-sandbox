@@ -103,7 +103,7 @@ be evaluated (`eval "$(msbx env export --epic E)"`), not logged.
   child it starts inherits them — the same trust boundary as the agent itself.
 - Changing a value means changing the store and running `msbx up` again; `up`
   re-renders the envelope and Compose reconciles the affected containers.
-- A tunnelled role cannot declare `x-msbx.env` or `x-msbx.secrets` yet: its
-  sidecar and its env injection land with
-  [MIR-262](https://multica.ai/miran248/issues/MIR-262), and a manifest that
-  declares them is refused rather than silently ignored.
+- A tunnelled role declares `x-msbx.env` and `x-msbx.secrets` like any other
+  role: they are injected into its generated tunnel sidecar, which is how the
+  transport gets its credentials. The secret names and the transports are in
+  [tunnels.md](tunnels.md).
