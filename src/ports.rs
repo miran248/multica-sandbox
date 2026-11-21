@@ -6,7 +6,7 @@
 //! when all 16 ports are free to bind; a recorded block is stable even if a
 //! container is not running, because a restart must keep the same ports.
 
-use crate::state::{now, Entry, PublishedPort, State, Store};
+use crate::state::{now, Entry, PublishedPort, State, Store, TunnelRecord};
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
@@ -176,6 +176,7 @@ impl Allocator {
                         epic: None,
                         dir: None,
                         published: Vec::new(),
+                        tunnels: Vec::new(),
                     },
                 );
                 self.store.save(&state)?;
@@ -250,6 +251,7 @@ impl Allocator {
         entry.epic = Some(meta.epic.clone());
         entry.dir = Some(meta.dir.to_string_lossy().to_string());
         entry.published = meta.published.clone();
+        entry.tunnels = meta.tunnels.clone();
         entry.last_used = at;
         self.store.save(&state)?;
         Ok(())
@@ -298,6 +300,7 @@ pub struct EpicMeta {
     pub epic: String,
     pub dir: PathBuf,
     pub published: Vec<PublishedPort>,
+    pub tunnels: Vec<TunnelRecord>,
 }
 
 fn idle_entries(state: &State, idle: u64, at: u64) -> Vec<(String, Block)> {
@@ -444,6 +447,11 @@ mod tests {
             published: vec![PublishedPort {
                 role: "pg".to_string(),
                 port: block.start,
+            }],
+            tunnels: vec![TunnelRecord {
+                role: "pg".to_string(),
+                via: "ssh".to_string(),
+                upstream: "db.example.com:5432".to_string(),
             }],
         };
         allocator.record("demo-epic-a", &meta, 20).unwrap();

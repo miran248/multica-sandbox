@@ -11,3 +11,5 @@
   harness envelope and its stated limits.
 - Harness wrapper: [wrapper.md](wrapper.md) — `msbx-run`, epic resolution from
   the task branch, probe pass-through, profile wiring and rollback.
+- Remote services: [tunnels.md](tunnels.md) — the `x-msbx.tunnels` sidecar, the
+  `ssh` and `cloudflared` transports, their credentials and stated limits.

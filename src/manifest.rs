@@ -175,20 +175,28 @@ impl Manifest {
             }
         }
 
-        for (role, _) in &self.publish {
+        for (role, port) in &self.publish {
             self.require_role(role, "publish")?;
+            if let Some(tunnel) = self.tunnels.get(role) {
+                if *port != tunnel.port {
+                    return Err(ManifestError::new(format!(
+                        "`x-msbx.publish.{role}` is {port} but `x-msbx.tunnels.{role}.port` is {}; a tunnelled role listens on its tunnel port",
+                        tunnel.port
+                    )));
+                }
+            }
         }
         for role in self.env.keys() {
             self.require_role(role, "env")?;
-            self.require_local(role, "env")?;
         }
         for role in self.secrets.keys() {
             self.require_role(role, "secrets")?;
-            self.require_local(role, "secrets")?;
         }
         Ok(())
     }
 
+    /// A role named in `publish`, `env` or `secrets` is either a Compose
+    /// service or a role `msbx` generates a tunnel sidecar for.
     fn require_role(&self, role: &str, block: &str) -> Result<(), ManifestError> {
         if self.services.contains(role) || self.tunnels.contains_key(role) {
             Ok(())
@@ -197,18 +205,6 @@ impl Manifest {
                 "`x-msbx.{block}.{role}` names no service or tunnel"
             )))
         }
-    }
-
-    /// Env files and secret mounts are injected into a service's container.
-    /// A tunnelled role's sidecar lands with [MIR-262], so declaring its
-    /// `env` or `secrets` today would be accepted and silently ignored.
-    fn require_local(&self, role: &str, block: &str) -> Result<(), ManifestError> {
-        if self.tunnels.contains_key(role) {
-            return Err(ManifestError::new(format!(
-                "`x-msbx.{block}.{role}` names a tunnelled role; `{block}` for a tunnel lands with MIR-262"
-            )));
-        }
-        Ok(())
     }
 }
 
@@ -332,6 +328,16 @@ fn parse_tunnels(value: &Value) -> Result<BTreeMap<String, Tunnel>, ManifestErro
                     if name.is_empty() {
                         return Err(ManifestError::new(format!(
                             "`x-msbx.tunnels.{role}.host` must not be empty"
+                        )));
+                    }
+                    // The host is interpolated into the generated sidecar's
+                    // command, so it stays a host name or address: no shell
+                    // metacharacters and no YAML-significant braces.
+                    if !name.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')
+                    }) {
+                        return Err(ManifestError::new(format!(
+                            "`x-msbx.tunnels.{role}.host` `{name}` must be a host name or address ([A-Za-z0-9._:-], brackets for IPv6)"
                         )));
                     }
                     host = Some(name.to_string());
@@ -545,6 +551,30 @@ services:
     }
 
     #[test]
+    fn a_tunnel_host_stays_a_host_name_or_address() {
+        // The host is interpolated into the generated sidecar's command.
+        for host in [
+            "db.example.com;rm -rf /",
+            "db$(whoami)",
+            "db example",
+            "db\"quoted",
+        ] {
+            let text = format!(
+                "x-msbx:\n  project: signals\n  tunnels:\n    pg:\n      host: {host}\n      port: 5432\n      via: ssh\nservices: {{}}\n"
+            );
+            let message = error(&text);
+            assert!(
+                message.contains("must be a host name or address"),
+                "{host}: {message}"
+            );
+        }
+        assert!(Manifest::parse(
+            "x-msbx:\n  project: signals\n  tunnels:\n    pg:\n      host: \"[::1]\"\n      port: 5432\n      via: ssh\nservices: {}\n"
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn publish_ports_must_be_ports() {
         assert!(
             error("x-msbx:\n  project: signals\n  publish:\n    pg: 0\nservices:\n  pg: {}\n")
@@ -584,15 +614,22 @@ services:
     }
 
     #[test]
-    fn env_and_secrets_for_a_tunnelled_role_are_refused_until_tunnels_land() {
-        let env = "x-msbx:\n  project: signals\n  env:\n    pg: [DATABASE_URL]\n  tunnels:\n    pg:\n      host: db.example.com\n      port: 5432\n      via: ssh\nservices:\n  web: {}\n";
-        let message = error(env);
-        assert!(message.contains("`x-msbx.env.pg`"), "{message}");
-        assert!(message.contains("MIR-262"), "{message}");
-        let secrets = "x-msbx:\n  project: signals\n  secrets:\n    pg: [PASSWORD]\n  tunnels:\n    pg:\n      host: db.example.com\n      port: 5432\n      via: ssh\nservices:\n  web: {}\n";
-        let message = error(secrets);
-        assert!(message.contains("`x-msbx.secrets.pg`"), "{message}");
-        assert!(message.contains("MIR-262"), "{message}");
+    fn env_and_secrets_for_a_tunnelled_role_are_accepted() {
+        let text = "x-msbx:\n  project: signals\n  env:\n    pg: [TUNNEL_USER]\n  secrets:\n    pg: [TUNNEL_KEY]\n  tunnels:\n    pg:\n      host: db.example.com\n      port: 5432\n      via: ssh\nservices:\n  web: {}\n";
+        let manifest = Manifest::parse(text).unwrap();
+        assert_eq!(manifest.env["pg"], vec!["TUNNEL_USER"]);
+        assert_eq!(manifest.secrets["pg"], vec!["TUNNEL_KEY"]);
+    }
+
+    #[test]
+    fn a_published_tunnel_must_publish_its_tunnel_port() {
+        let text = "x-msbx:\n  project: signals\n  publish:\n    pg: 5433\n  tunnels:\n    pg:\n      host: db.example.com\n      port: 5432\n      via: ssh\nservices:\n  web: {}\n";
+        let message = error(text);
+        assert!(message.contains("`x-msbx.publish.pg` is 5433"), "{message}");
+        assert!(
+            message.contains("`x-msbx.tunnels.pg.port` is 5432"),
+            "{message}"
+        );
     }
 
     #[test]

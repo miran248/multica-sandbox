@@ -4,18 +4,17 @@
 //! manifest, resolves the project's env and secret names from the store, gives
 //! the epic its port block, renders the envelope (per-role env files, secret
 //! files, harness env) and the override (container names, dotted aliases,
-//! loopback ports, env files, secret mounts, network name) into the epic's
-//! directory outside the checkout, runs `docker compose up -d --wait` and
-//! records what it did. `down` stops the containers and keeps the volumes; `rm`
-//! destroys the project, its volumes and its block; `status` reports services,
-//! health and ports; `gc` destroys boxes idle for 14 days and frees their
-//! blocks. `env ls` and `env export` read the rendered harness envelope.
+//! loopback ports, env files, secret mounts, tunnel sidecars, network name) into
+//! the epic's directory outside the checkout, runs `docker compose up -d --wait`
+//! and records what it did. `down` stops the containers and keeps the volumes;
+//! `rm` destroys the project, its volumes and its block; `status` reports
+//! services, health, ports and tunnelled roles; `gc` destroys boxes idle for 14
+//! days and frees their blocks. `env ls` and `env export` read the rendered
+//! harness envelope.
 //!
 //! Nothing here prints a value from the store: names, roles and paths only.
 //! The override is still the only place names, ports and the Compose project
-//! are decided; tunnels are a later stage ([MIR-262]).
-//!
-//! [MIR-262]: https://multica.ai/miran248/issues/MIR-262
+//! are decided.
 
 use crate::driver;
 use crate::env::{self, Envelope};
@@ -329,6 +328,7 @@ fn up(options: &Options) -> Result<(), Failure> {
                 epic: key.epic().to_string(),
                 dir: root.clone(),
                 published: epic::recorded(&published),
+                tunnels: epic::recorded_tunnels(&manifest),
             },
             at,
         )
@@ -351,6 +351,20 @@ fn up(options: &Options) -> Result<(), Failure> {
             port.host_port,
             port.container_port,
             key.container(&port.role)
+        );
+    }
+    for (role, tunnel) in &manifest.tunnels {
+        let published_note = if published.iter().any(|port| &port.role == role) {
+            ""
+        } else {
+            " (no host port)"
+        };
+        println!(
+            "  tunnel {role:<5} via {} → {}:{}  {}{published_note}",
+            tunnel.via.as_str(),
+            tunnel.host,
+            tunnel.port,
+            key.alias(role)
         );
     }
     for (role, names) in envelope.role_env_names() {
@@ -706,6 +720,16 @@ struct ServiceStatus {
     health: String,
     exit_code: Option<i64>,
     ports: Vec<PortStatus>,
+    /// Present for a role served by a generated tunnel sidecar; absent for a
+    /// local Compose service.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel: Option<TunnelStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct TunnelStatus {
+    via: String,
+    upstream: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -769,8 +793,16 @@ fn status(options: &Options) -> Result<(), Failure> {
                     .join(", ")
             };
             println!(
-                "  {:<12} {:<9} {:<8} {:<22} {}",
-                service.role, service.state, health, ports, service.container
+                "  {:<12} {:<11} {:<9} {:<8} {:<22} {}",
+                service.role,
+                match &service.tunnel {
+                    Some(tunnel) => format!("tunnel:{}", tunnel.via),
+                    None => "local".to_string(),
+                },
+                service.state,
+                health,
+                ports,
+                service.container
             );
         }
     }
@@ -813,6 +845,7 @@ fn box_status(key: &str, entry: &Entry) -> Result<BoxStatus, Failure> {
             if ports.is_empty() {
                 ports = recorded_ports(&role, entry, names.as_ref());
             }
+            let tunnel = tunnel_status(entry, &role);
             ServiceStatus {
                 role,
                 container: if container.name.is_empty() {
@@ -828,6 +861,7 @@ fn box_status(key: &str, entry: &Entry) -> Result<BoxStatus, Failure> {
                 health: container.health,
                 exit_code: container.exit_code,
                 ports,
+                tunnel,
             }
         })
         .collect();
@@ -842,6 +876,22 @@ fn box_status(key: &str, entry: &Entry) -> Result<BoxStatus, Failure> {
                 health: String::new(),
                 exit_code: None,
                 ports: recorded_ports(&port.role, entry, names.as_ref()),
+                tunnel: tunnel_status(entry, &port.role),
+            });
+        }
+    }
+    // A recorded tunnel with no container left is listed, so a sidecar that
+    // never started is visible instead of silently missing.
+    for tunnel in &entry.tunnels {
+        if !services.iter().any(|service| service.role == tunnel.role) {
+            services.push(ServiceStatus {
+                role: tunnel.role.clone(),
+                container: format!("{key}-{}", tunnel.role),
+                state: "absent".to_string(),
+                health: String::new(),
+                exit_code: None,
+                ports: recorded_ports(&tunnel.role, entry, names.as_ref()),
+                tunnel: tunnel_status(entry, &tunnel.role),
             });
         }
     }
@@ -859,6 +909,18 @@ fn box_status(key: &str, entry: &Entry) -> Result<BoxStatus, Failure> {
         dir: entry.dir.clone(),
         services,
     })
+}
+
+/// The recorded tunnel for `role`, when `up` generated one.
+fn tunnel_status(entry: &Entry, role: &str) -> Option<TunnelStatus> {
+    entry
+        .tunnels
+        .iter()
+        .find(|tunnel| tunnel.role == role)
+        .map(|tunnel| TunnelStatus {
+            via: tunnel.via.clone(),
+            upstream: tunnel.upstream.clone(),
+        })
 }
 
 fn recorded_ports(role: &str, entry: &Entry, names: Option<&Key>) -> Vec<PortStatus> {

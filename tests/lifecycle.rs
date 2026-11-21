@@ -46,6 +46,38 @@ const DATABASE_URL: &str = "postgres://{{host:pg}}:{{port:pg}}/{{epic}}/{{projec
 const STRIPE_KEY: &str = "sk_live_marker";
 const SMTP_PASSWORD: &str = "hunter2-marker";
 
+const TUNNEL_MANIFEST: &str = r#"x-msbx:
+  project: signals
+  env:
+    pg: [MSBX_TUNNEL_SSH_USER]
+  secrets:
+    pg: [MSBX_TUNNEL_SSH_KEY]
+  tunnels:
+    pg:
+      host: db.internal.example.com
+      port: 5432
+      via: ssh
+services:
+  client:
+    image: alpine:3.20
+    command: ["sleep", "300"]
+"#;
+
+const CLOUDFLARED_MANIFEST: &str = r#"x-msbx:
+  project: signals
+  tunnels:
+    pg:
+      host: db.internal.example.com
+      port: 5432
+      via: cloudflared
+services:
+  client:
+    image: alpine:3.20
+    command: ["sleep", "300"]
+"#;
+
+const TUNNEL_SSH_KEY: &str = "a2V5LW1hcmtlcg==";
+
 /// The generated override, as Compose sees it.
 #[derive(Debug, Deserialize)]
 struct Override {
@@ -57,6 +89,12 @@ struct Override {
 struct Service {
     container_name: String,
     #[serde(default)]
+    image: String,
+    #[serde(default)]
+    command: Vec<String>,
+    #[serde(default)]
+    healthcheck: Option<Healthcheck>,
+    #[serde(default)]
     ports: Vec<String>,
     #[serde(default)]
     env_file: Vec<String>,
@@ -66,6 +104,11 @@ struct Service {
     volumes: Vec<String>,
     labels: BTreeMap<String, String>,
     networks: BTreeMap<String, Attached>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Healthcheck {
+    test: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -861,4 +904,173 @@ fn unknown_or_unpublished_tokens_stop_up() {
         assert!(message.contains(expected), "{value}: {message}");
         assert!(fixture.log().is_empty(), "{value} started docker");
     }
+}
+
+#[test]
+fn a_tunnelled_role_gets_a_generated_sidecar_and_no_host_port() {
+    let fixture = Fixture::new("tunnel-ssh");
+    fixture.write_manifest(TUNNEL_MANIFEST);
+    fixture.write_store_env("MSBX_TUNNEL_SSH_USER=tunnel\n");
+    fixture.write_store_secret("MSBX_TUNNEL_SSH_KEY", &format!("{TUNNEL_SSH_KEY}\n"));
+
+    let output = fixture.up(&["up", "--epic", "MIR-42"]);
+    assert_ok(&output);
+
+    let doc = fixture.override_doc();
+    let pg = &doc.services["pg"];
+    assert_eq!(pg.container_name, "signals-mir-42-pg");
+    assert_eq!(pg.image, "alpine:3.20");
+    assert_eq!(pg.command.len(), 3, "sh -c <script>: {:?}", pg.command);
+    let script = &pg.command[2];
+    assert!(
+        script.contains("-L \"0.0.0.0:5432:db.internal.example.com:5432\""),
+        "the sidecar listens on the role's port: {script}"
+    );
+    assert!(
+        script.contains("$${MSBX_TUNNEL_SSH_USER"),
+        "Compose must not interpolate the script's variables: {script}"
+    );
+    assert!(
+        script.contains("ExitOnForwardFailure=yes") && script.contains("ConnectTimeout=10"),
+        "an unreachable endpoint fails instead of hanging: {script}"
+    );
+    assert!(
+        pg.ports.is_empty(),
+        "an unpublished tunnel has no host port: {:?}",
+        pg.ports
+    );
+    assert_eq!(
+        pg.networks["default"].aliases,
+        vec!["pg.mir-42.signals.msbx.test"]
+    );
+    assert_eq!(pg.labels["com.msbx.tunnel"], "ssh");
+    let healthcheck = pg.healthcheck.as_ref().unwrap();
+    assert_eq!(healthcheck.test, vec!["CMD-SHELL", "nc -z 127.0.0.1 5432"]);
+    assert!(
+        pg.env_file[0].ends_with("/env/pg.env"),
+        "the tunnel role's env file is injected: {:?}",
+        pg.env_file
+    );
+    assert_eq!(
+        pg.environment["MSBX_TUNNEL_SSH_KEY_FILE"],
+        "/run/msbx/secrets/MSBX_TUNNEL_SSH_KEY"
+    );
+    assert!(pg.volumes[0]
+        .ends_with("/secrets/MSBX_TUNNEL_SSH_KEY:/run/msbx/secrets/MSBX_TUNNEL_SSH_KEY:ro"));
+    assert!(
+        !doc.services["client"]
+            .labels
+            .contains_key("com.msbx.tunnel"),
+        "a local service is not labelled as a tunnel"
+    );
+
+    let entry = fixture.entry("signals-mir-42");
+    assert_eq!(entry["tunnels"][0]["role"].as_str(), Some("pg"));
+    assert_eq!(entry["tunnels"][0]["via"].as_str(), Some("ssh"));
+    assert_eq!(
+        entry["tunnels"][0]["upstream"].as_str(),
+        Some("db.internal.example.com:5432")
+    );
+
+    let printed = stdout(&output);
+    assert!(printed.contains("tunnel pg"), "{printed}");
+    assert!(printed.contains("no host port"), "{printed}");
+    assert!(printed.contains("pg.mir-42.signals.msbx.test"), "{printed}");
+
+    fs::write(
+        &fixture.ps,
+        "{\"Service\":\"pg\",\"Name\":\"signals-mir-42-pg\",\"State\":\"running\",\"Health\":\"healthy\",\"ExitCode\":0,\"Publishers\":[]}\n",
+    )
+    .unwrap();
+    let status = fixture.up(&["status", "--epic", "mir-42", "--json"]);
+    assert_ok(&status);
+    let report: Value = serde_json::from_str(&stdout(&status)).unwrap();
+    let service = &report["boxes"][0]["services"][0];
+    assert_eq!(service["role"].as_str(), Some("pg"));
+    assert_eq!(service["tunnel"]["via"].as_str(), Some("ssh"));
+    assert_eq!(
+        service["tunnel"]["upstream"].as_str(),
+        Some("db.internal.example.com:5432")
+    );
+
+    let human = fixture.up(&["status", "--epic", "mir-42"]);
+    assert_ok(&human);
+    assert!(
+        stdout(&human).contains("tunnel:ssh"),
+        "a tunnelled role is listed distinctly: {}",
+        stdout(&human)
+    );
+}
+
+#[test]
+fn a_cloudflared_tunnel_is_selectable() {
+    let fixture = Fixture::new("tunnel-cloudflared");
+    fixture.write_manifest(CLOUDFLARED_MANIFEST);
+    let output = fixture.up(&["up", "--epic", "MIR-42"]);
+    assert_ok(&output);
+
+    let doc = fixture.override_doc();
+    let pg = &doc.services["pg"];
+    assert_eq!(pg.image, "cloudflare/cloudflared:2026.11.1");
+    assert_eq!(
+        pg.command,
+        vec![
+            "access".to_string(),
+            "tcp".to_string(),
+            "--hostname".to_string(),
+            "db.internal.example.com".to_string(),
+            "--url".to_string(),
+            "0.0.0.0:5432".to_string(),
+        ]
+    );
+    assert!(pg.ports.is_empty(), "{:?}", pg.ports);
+    assert_eq!(
+        pg.networks["default"].aliases,
+        vec!["pg.mir-42.signals.msbx.test"]
+    );
+    assert_eq!(pg.labels["com.msbx.tunnel"], "cloudflared");
+
+    let human = fixture.up(&["status", "--epic", "mir-42"]);
+    assert_ok(&human);
+    assert!(
+        stdout(&human).contains("tunnel:cloudflared"),
+        "{}",
+        stdout(&human)
+    );
+}
+
+#[test]
+fn a_published_tunnel_gets_a_loopback_port_from_the_block() {
+    let fixture = Fixture::new("tunnel-published");
+    fixture.write_manifest(
+        "x-msbx:\n  project: signals\n  publish:\n    pg: 5432\n  tunnels:\n    pg:\n      host: db.internal.example.com\n      port: 5432\n      via: ssh\nservices:\n  client: {}\n",
+    );
+    let output = fixture.up(&["up", "--epic", "MIR-42"]);
+    assert_ok(&output);
+    let start = fixture.block_start("signals-mir-42");
+    let doc = fixture.override_doc();
+    assert_eq!(
+        doc.services["pg"].ports,
+        vec![format!("127.0.0.1:{start}:5432")]
+    );
+    let printed = stdout(&output);
+    assert!(
+        printed.contains(&format!("127.0.0.1:{start} → 5432")),
+        "{printed}"
+    );
+}
+
+#[test]
+fn a_tunnel_published_at_another_port_is_refused_before_docker() {
+    let fixture = Fixture::new("tunnel-port-mismatch");
+    fixture.write_manifest(
+        "x-msbx:\n  project: signals\n  publish:\n    pg: 6432\n  tunnels:\n    pg:\n      host: db.internal.example.com\n      port: 5432\n      via: ssh\nservices:\n  client: {}\n",
+    );
+    let output = fixture.up(&["up", "--epic", "MIR-42"]);
+    assert!(!output.status.success());
+    let message = stderr(&output);
+    assert!(message.contains("x-msbx.publish.pg"), "{message}");
+    assert!(message.contains("x-msbx.tunnels.pg.port"), "{message}");
+    assert!(fixture.log().is_empty(), "no container command was run");
+    assert!(!fixture.state_path().exists(), "no block was allocated");
 }

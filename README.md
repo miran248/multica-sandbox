@@ -18,16 +18,18 @@ is written into the env (`MSBX_<ROLE>_PORT`), never hard-coded on the host.
 
 ## Status
 
-**Stage 5 delivered.** On top of the Docker foundation (`doctor`, `init`, the
+**Stage 6 delivered.** On top of the Docker foundation (`doctor`, `init`, the
 `msbx dns` resolver and its macOS/Linux installation, the `x-msbx` manifest
 reader and the per-epic port-block allocator) the Compose lifecycle is in
 place: `up`, `down`, `rm`, `status` and `gc` drive one Compose project per epic,
 and the generated override decides container names, dotted network aliases and
 loopback port mappings. The env store renders per-role and harness envelopes
 outside the checkout, and `msbx-run` wraps the agent launch so a task starts its
-epic's box and the harness sees the exported values. Two epics run the same
-Postgres stack at once. Tunnels and the release into `main` are the remaining
-stages of [MIR-178](https://multica.ai/miran248/issues/MIR-178).
+epic's box and the harness sees the exported values. `x-msbx.tunnels` turns a
+remote service into a generated sidecar on the epic network — addressed as
+`pg:5432` by a peer, with no host port — over `ssh` or `cloudflared`. Two epics
+run the same Postgres stack at once. The release into `main` is the remaining
+stage of [MIR-178](https://multica.ai/miran248/issues/MIR-178).
 
 ## Host setup
 
@@ -100,9 +102,21 @@ network is named `<project>-<epic>`, so two epics never share one.
 non-interactive `rm` requires `--yes`. `down` and `rm` are no-ops for an absent
 box, and both act on the Compose project name alone, so they work after the
 checkout is gone. `status` shows each recorded box's services, health and
-assigned ports (`--json` for scripts). `gc --dry-run` lists boxes idle for 14
-days without changing anything; `gc` stops them, removes their volumes and
-releases their blocks.
+assigned ports (`--json` for scripts), marking a tunnelled role as
+`tunnel:<via>`. `gc --dry-run` lists boxes idle for 14 days without changing
+anything; `gc` stops them, removes their volumes and releases their blocks.
+
+## Remote services
+
+`x-msbx.tunnels` declares a role that is served by a tunnel sidecar instead of a
+Compose service: `host` is the remote service, `port` is its port and the port
+the sidecar listens on, and `via` is `ssh` or `cloudflared`. `msbx up` generates
+the sidecar on the epic's network with the role's dotted alias, so a peer reaches
+it at `pg:5432` and `pg.<epic>.<project>.msbx.test:5432` exactly as it reaches a
+local `pg`. Nothing is published on the host unless `x-msbx.publish` lists the
+role, and the sidecar gets the env and secret names the role declares — the
+transport's credentials. See [docs/tunnels.md](docs/tunnels.md) for the two
+transport contracts and their limits.
 
 ## Agent launch
 
@@ -142,6 +156,9 @@ msbx-run [harness args...]                    # the profile's wrapper: up, expor
   block lists names; the store holds values outside every checkout, and `msbx`
   renders per-role env files and mounts `/run/msbx/secrets/<name>` (0600).
   `msbx-run` exports the harness envelope into the agent's process.
+- **Remote is local-shaped** — `x-msbx.tunnels` generates an in-epic sidecar
+  (`ssh` or `cloudflared`) that answers to the role's name and port; there is no
+  host port forwarding.
 - **Portable definitions** — the engine is here; each project repository owns
   its own manifest and volumes.
 

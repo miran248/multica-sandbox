@@ -33,8 +33,9 @@ pub struct State {
 /// `last_used` is when `msbx` last touched the epic and is what `gc` reads.
 ///
 /// The remaining fields are written by `up`: the two keys, the checkout it was
-/// started from, and the role → host-port mapping the block was spent on. They
-/// are optional so a state file from before the lifecycle verbs still loads.
+/// started from, the role → host-port mapping the block was spent on and the
+/// generated tunnel sidecars. They are optional so a state file from before the
+/// lifecycle verbs still loads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub start: u16,
@@ -48,6 +49,8 @@ pub struct Entry {
     pub dir: Option<String>,
     #[serde(default)]
     pub published: Vec<PublishedPort>,
+    #[serde(default)]
+    pub tunnels: Vec<TunnelRecord>,
 }
 
 /// A role published from the host and the block port it was given.
@@ -55,6 +58,14 @@ pub struct Entry {
 pub struct PublishedPort {
     pub role: String,
     pub port: u16,
+}
+
+/// A role `msbx` serves with a generated tunnel sidecar, as `up` recorded it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelRecord {
+    pub role: String,
+    pub via: String,
+    pub upstream: String,
 }
 
 impl State {
@@ -347,6 +358,11 @@ mod tests {
                 published: vec![PublishedPort {
                     role: "pg".to_string(),
                     port: 23000,
+                }],
+                tunnels: vec![TunnelRecord {
+                    role: "search".to_string(),
+                    via: "cloudflared".to_string(),
+                    upstream: "search.internal.example.com:9200".to_string(),
                 }],
             },
         );
