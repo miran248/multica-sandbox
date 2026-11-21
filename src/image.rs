@@ -776,6 +776,7 @@ const APT_PACKAGES: &[&str] = &[
     "gh",
     "jq",
     "ripgrep",
+    "procps",
     "socat",
     "build-essential",
     "python3",
@@ -790,6 +791,7 @@ fn apt_arg(name: &str) -> Option<&'static str> {
         "gh" => "APT_GH",
         "jq" => "APT_JQ",
         "ripgrep" => "APT_RIPGREP",
+        "procps" => "APT_PROCPPS",
         "socat" => "APT_SOCAT",
         "build-essential" => "APT_BUILD_ESSENTIAL",
         "python3" => "APT_PYTHON3",
@@ -997,6 +999,7 @@ mod tests {
             "MULTICA_URL_AMD64",
             "MULTICA_URL_ARM64",
             "APT_LIBSTDCXX6",
+            "APT_PROCPPS",
         ] {
             assert!(names.contains(&required), "missing {required}");
         }

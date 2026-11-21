@@ -40,7 +40,7 @@ The manifest pins:
 
 - the Debian `bookworm-slim` base and the Node, Rust and Go images by digest;
 - the exact Debian package versions (`ca-certificates`, git, gh, jq, ripgrep,
-  socat, build-essential, python3, libstdc++6 and the build-only curl);
+  procps, socat, build-essential, python3, libstdc++6 and the build-only curl);
 - Pi's standalone release, the Linux Multica CLI and every Pi package with a
   sha256 checksum for each architecture.
 

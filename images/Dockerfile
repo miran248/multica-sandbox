@@ -34,6 +34,7 @@ ARG APT_GIT
 ARG APT_GH
 ARG APT_JQ
 ARG APT_RIPGREP
+ARG APT_PROCPPS
 ARG APT_SOCAT
 ARG APT_BUILD_ESSENTIAL
 ARG APT_PYTHON3
@@ -73,6 +74,7 @@ RUN set -eux; \
         "gh=${APT_GH}" \
         "jq=${APT_JQ}" \
         "ripgrep=${APT_RIPGREP}" \
+        "procps=${APT_PROCPPS}" \
         "socat=${APT_SOCAT}" \
         "build-essential=${APT_BUILD_ESSENTIAL}" \
         "python3=${APT_PYTHON3}" \
