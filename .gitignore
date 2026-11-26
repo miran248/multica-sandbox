@@ -1,2 +1,6 @@
 /target
 .local/
+
+# kind prototype: generated manifests, cluster config, machine-local probe output
+proto/kind/.generated/
+proto/kind/manifests/overlays/*/.generated/

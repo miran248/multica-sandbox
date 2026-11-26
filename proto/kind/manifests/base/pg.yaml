@@ -1,0 +1,83 @@
+# Role pg: the stateful role. Data is a hostPath under the mounted msbx state
+# dir, so it survives `down`/`up` and a kind node restart; it does not survive
+# `rm` (which deletes the directory) or `kind delete cluster` (which deletes
+# every scope's data, because the state dir is shared).
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg
+spec:
+  selector:
+    app: pg
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pg
+spec:
+  serviceName: pg
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pg
+  template:
+    metadata:
+      labels:
+        app: pg
+    spec:
+      initContainers:
+        # hostPath directories are created by kubelet as root; the postgres
+        # image runs as uid 70. chown is attempted first because it is the only
+        # correct answer; chmod 0777 is the fallback when the macOS file
+        # sharing layer refuses ownership changes. The echo line records which
+        # one actually happened (`kubectl logs -c fix-owner`).
+        - name: fix-owner
+          image: postgres:16-alpine
+          imagePullPolicy: Never
+          command:
+            - sh
+            - -c
+            - >
+              mkdir -p /var/lib/postgresql/data &&
+              (chown -R 70:70 /var/lib/postgresql/data &&
+               echo fix-owner=chown ||
+               (chmod -R 0777 /var/lib/postgresql/data &&
+                echo fix-owner=chmod-777))
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: Never
+          envFrom:
+            - secretRef:
+                name: pg
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: data
+          hostPath:
+            # Replaced by the generated runtime patch with this machine's path.
+            path: /var/msbx/placeholder/pgdata
+            type: DirectoryOrCreate
+        - name: initdb
+          configMap:
+            name: pg-initdb

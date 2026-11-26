@@ -1,0 +1,19 @@
+# One HTTP listener for every scope, virtual-hosted by name. The name is the
+# contract's alias shape; resolution to 127.0.0.1 is the host resolver's job.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: web.scope-b.kindproto.msbx.test
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 8080

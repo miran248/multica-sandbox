@@ -1,0 +1,42 @@
+# Role harness: the stand-in for Pi as a pod in the scope namespace. It runs in
+# the namespace (so it uses cluster DNS and canonical ports), mounts the task
+# workdir root at its identical absolute path, and gets the same Secret shape as
+# any other role.
+#
+# The workdir volume and mount are machine-local and therefore added by the
+# generated runtime patch, not declared here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harness
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: harness
+  template:
+    metadata:
+      labels:
+        app: harness
+    spec:
+      containers:
+        - name: harness
+          image: kindproto/harness:dev
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/stub.sh"]
+          envFrom:
+            - secretRef:
+                name: harness
+          volumeMounts:
+            - name: secrets
+              mountPath: /run/msbx/secrets
+              readOnly: true
+      volumes:
+        - name: secrets
+          projected:
+            sources:
+              - secret:
+                  name: harness
+                  items:
+                    - key: API_TOKEN
+                      path: API_TOKEN

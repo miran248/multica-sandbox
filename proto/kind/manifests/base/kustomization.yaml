@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - pg.yaml
+  - web.yaml
+  - harness.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: kindproto
+      msbx.dev/substrate: kind
+    includeSelectors: true

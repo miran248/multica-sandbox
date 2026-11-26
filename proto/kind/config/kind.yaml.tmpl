@@ -1,0 +1,34 @@
+# Template: bootstrap.sh renders this with the host's absolute paths.
+# Everything that cannot be changed after `kind create cluster` lives here.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: __CLUSTER__
+networking:
+  apiServerAddress: "127.0.0.1"
+  apiServerPort: __API_PORT__
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # One published window for the ingress, fixed at cluster creation.
+      # hostPort 80 is held by Docker Desktop itself on this machine, hence 8080.
+      - containerPort: 80
+        hostPort: __INGRESS_HTTP_PORT__
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      - containerPort: 443
+        hostPort: __INGRESS_HTTPS_PORT__
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+    extraMounts:
+      # The task workdir root and the msbx state dir at their identical absolute
+      # paths. A pod's hostPath then lands on the host filesystem.
+      - hostPath: __WORKDIR_ROOT__
+        containerPath: __WORKDIR_ROOT__
+      - hostPath: __STATE_ROOT__
+        containerPath: __STATE_ROOT__

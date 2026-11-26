@@ -1,0 +1,64 @@
+# Role web: the HTTP role, reached from the host through the shared ingress.
+# The document root is a ConfigMap per scope, the secret file is a projected
+# volume at the contract's path (/run/msbx/secrets/<NAME>).
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: kindproto/web:dev
+          imagePullPolicy: Never
+          envFrom:
+            - secretRef:
+                name: web
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            periodSeconds: 2
+            failureThreshold: 30
+          volumeMounts:
+            - name: www
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+            - name: secrets
+              mountPath: /run/msbx/secrets
+              readOnly: true
+      volumes:
+        - name: www
+          configMap:
+            name: web-www
+        - name: secrets
+          projected:
+            sources:
+              - secret:
+                  name: web
+                  items:
+                    - key: API_TOKEN
+                      path: API_TOKEN

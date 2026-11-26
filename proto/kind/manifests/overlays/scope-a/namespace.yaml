@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kindproto-scope-a
+  labels:
+    msbx.dev/project: kindproto
+    msbx.dev/scope: scope-a
