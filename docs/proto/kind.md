@@ -49,7 +49,7 @@ not touch a hostPath.
 | M2a | Host reaches `web` by name through the ingress | PASS | `curl -H 'Host: web.scope-a.kindproto.msbx.test' http://127.0.0.1:8080/` served scope-a; two scopes share the one listener |
 | M2b | Host reaches `pg` over a forward | PASS | host `psql` → `127.0.0.1:15432` (`kubectl port-forward svc/pg`) queried `scope-a` |
 | M3 | The forward survives a pod replacement unattended | **FAIL** | `kubectl port-forward` exits with `error: lost connection to pod` when `pg-0` is replaced; before it exits the local socket can still appear open while connections fail. A human or a supervisor must re-establish it |
-| M4 | Images load without a registry | PASS | `kind load docker-image` fails on this combination; `docker save \| ctr -n k8s.io images import` loaded web 402 ms, harness 1463 ms, postgres 1327 ms, nginx 581 ms; pods run `imagePullPolicy: Never` |
+| M4 | Images load without a registry | PASS | `kind load docker-image` fails on this combination; `docker save \| ctr -n k8s.io images import` loaded web 417 ms, harness 1430 ms, postgres 1449 ms, nginx 408 ms; pods run `imagePullPolicy: Never` |
 | M5a | Data survives `down`/`up` | PASS | a row written before `down` was present after `up`; warm up-to-first-query 3156 ms |
 | M5b | Data survives a node stop/start | PASS | `docker stop`/`start` of the node: 50.2 s from stop to the first successful query, marker and row intact |
 | M6a | A pod writes the task workdir at its identical absolute path | PASS | host file read in the pod; pod-written file read on the host as `miran:staff -rw-r--r--`; the harness stub ran as uid 0, the host dir was 0755 |
